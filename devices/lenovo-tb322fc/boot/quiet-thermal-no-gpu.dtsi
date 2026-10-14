@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
+// TODO(elden): 照 devices/lenovo-tb323fu/boot/quiet-thermal-no-gpu.dtsi 的意图重写——
+// 在 quiet 温区（bootloader/菜单阶段）解绑 GPU，避免 Android splash→Linux 交接时
+// GPU 被意外上电。elden 的节点名/gmu/gpucc 接线以 sm8750-lenovo-elden.dts 为准，
+// 未从真机 fdt 核对前不要使用。

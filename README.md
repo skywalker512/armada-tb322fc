@@ -35,3 +35,16 @@ ArmadaOS（SteamOS-like ARM Linux）适配 Lenovo Legion Y700 Gen 4 / Legion Tab
 - `docs/01-STATUS.md` — 硬件功能状态矩阵（主线 vs 下游 vs Android 侧）
 - `docs/02-PLAN.md` — 候选技术路线与待决策项
 - `SOURCES.md` — 跟踪的上游仓库 / 补丁集 / 版本 pin
+
+## 仓库结构
+
+本仓以 [mydanyi/armadaos-freedom](https://github.com/mydanyi/armadaos-freedom)
+（本身是 armada-os/armada 的 fork）为基底合并而来，携带 armada 上游全部历史 +
+kShimC STAR_CHART 快照 + tb323fu 设备目录样板。
+
+- `devices/lenovo-tb322fc/` — 四代适配目录（内核 pin、固件清单、rootfs 起步件、
+  kShimC elden 适配层、构建骨架），是本仓的工作重心
+- `devices/lenovo-tb323fu/` — freedom 带来的五代参照实现，勿删
+- 其余目录（`build_files/`、`system_files/`、`packages/`、`decky/` 等）为
+  armada/freedom 上游结构，设备集成时按需接入
+- `README-armada.md` — 上游 armada 原版 README

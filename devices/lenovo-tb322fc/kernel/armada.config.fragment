@@ -1,0 +1,8 @@
+# ArmadaOS delta over h0cheung kernel.config (v7.2-elden baseline).
+# 基线已覆盖的不重复列；此表只放增量与需复核项。
+
+CONFIG_ZSWAP=y
+CONFIG_ZSWAP_DEFAULT_ON=y
+
+# FEX/Box64 大栈与 4K 页兼容：基线 CONFIG_ARM64_4K_PAGES 已确认，
+# 若未来换 16K 页构建需重测 FEX。

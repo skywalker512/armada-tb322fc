@@ -31,6 +31,13 @@
   扬声器（AW88461 + AudioReach 拓扑/UCM）、内置麦、双 AW86927 触觉、ADSP/SSC 传感器、
   s2idle 挂起；摄像头部分可用；剩余问题在充电唤醒/电量上报与休眠到盘。
   CI 可直接产出 Arch Linux Ports Plasma 的 `boot.img` + `rootfs.img`（尚需固件配套验证）。
+  **其 `packages/` 已经是一整套 Arch 版 Armada 用户态**：armada-control/armada-store
+  decky 插件源码、armada-powerd（含 `lenovo-y700-gen4.conf`）、gamescope-armada
+  （29 个补丁 + `csot.pp8807hb1-1.lua` 面板 profile）、gamescope-session-steam、
+  steamos-manager（`sm8750.toml` platform profile）、mesa-y700-gen4-git（a8xx Turnip
+  补丁集）、steam-bootstrap、y700-charge decky 插件、tb322fc-sensors（gyro/hall 桥）、
+  iio-sensor-proxy-y700、thermald 配置等——即「Arch Ports 上的 Armada」也已在路上，
+  缺的同样是发行版集成与多启动。
 - **[GEEKiDoS/tb322fc-linux](https://github.com/GEEKiDoS/tb322fc-linux)**（2026-09-12 创建）：
   同一 umbrella 的先驱版本，内核开发在其 linux 仓库 `v7.2-elden` 分支；README 明确说明结构
   沿袭 tb321fu-linux，h0cheung 版是其后继/协作 fork（状态更新到 BT、suspend、mic 已验证）。
@@ -103,7 +110,8 @@
 | 主线 DT | ✅ 补丁在审（v2，2026-07-26） | Pengyu Luo（+ guf296 参与） |
 | SM8750 SoC 主线化 | ✅ 社区 org 活跃 | sm8750-mainline、sunflower2333 等 |
 | **四代主线 Linux bring-up** | ✅ **已在做，≈90% 子系统可用** | **h0cheung/GEEKiDoS（tb322fc-linux，10-11 活跃）；xiaquwan1001（研究型工作区）** |
-| **ArmadaOS 四代移植** | ❌ 无公开仓库 | **本仓库要填的空——但应站在上面两个 bring-up 之上，别重造内核层** |
+| 四代 Armada 用户态 | ⚠️ Arch Ports 版在 h0cheung 仓 `packages/`（非 bootc） | 同上 |
+| **ArmadaOS（bootc 发行版）四代移植** | ❌ 无公开仓库 | **本仓库要填的空——但应站在上面两个 bring-up 之上，别重造内核层** |
 | ArmadaOS 三代移植 | ✅ 高完成度 | enij90/armada-tb321fu |
 | ArmadaOS 五代/平板 multiboot | ✅ 进行中 | mydanyi/armadaos-freedom（tb323fu） |
 | Android root/容器/Recovery/ROM | ✅ 可用 | ll1zt、polygraphene、LTBox、lolipuru、lenovo-basements |

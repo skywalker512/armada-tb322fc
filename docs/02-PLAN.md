@@ -30,19 +30,20 @@ bootc 镜像、游戏栈（Steam/FEX/Proton）、设备 overlay，以及保留 A
 
 **结论：A 的内容组织 + B 的启动方案 + h0cheung 的内核层。**
 
-## 里程碑草案
+## 里程碑草案（已开始执行）
 
-1. **吃透现有 bring-up**：读 h0cheung/tb322fc-linux 的 `sources.json`/`firmware.json`/
-   `docs/*` 与 xiaquwan1001 的 `INDEX.md`/`PITFALLS.md`/`TASKS.md`；把 pin 表抄进 `SOURCES.md`。
-2. **复现 baseline**：按其 CI/手动流程构建 `boot.img` + Arch rootfs，`fastboot boot` 验证
-   （不写分区）；记录 Q28 冷启动竞态的复现率。
-3. **内核 config 差分**：对照 Armada 需求（FEX、InputPlumber、手柄、音频拓扑、命名空间）
-   在 `v7.2-elden` 基础上开 `armada` 层 config fragment。
-4. **ArmadaOS rootfs**：bootc 镜像最小化接入（先看 armada-tb321fu 的 build_files/
-   post_process/disk_config 怎么组织设备差异）。
-5. **kShimC 多启动**：给 elden 加设备定义，验证 Android 保留 + TF 卡 ArmadaOS。
-6. **游戏栈验收**：Turnip 档位（Stable/Devel/WinNative）、Steam/FEX/Proton 冒烟、
-   刷新率档位、触控校准、G9、音频、挂起。
+1. ~~吃透现有 bring-up~~ ✅ 2026-10-14：pin 表与起步文件已落 `devices/lenovo-tb322fc/`
+   （`sources.json`/`firmware.json`/`kernel/`/`rootfs/`/`patches/`，来自 h0cheung pin）。
+   另发现 h0cheung `packages/` 已是 Arch 版 Armada 用户态全套——bootc 集成时可对照。
+2. **kShimC elden 适配**（进行中）：`boot/kshim-elden/elden_defconfig` 草稿已建；
+   待真机 fdt/iomem 提取后定稿 ramoops/reserved-memory/PMIC 参数。
+   菜单触摸初版关闭（NT36536 驱动未移植），走 PMIC 按键。
+3. **复现 baseline**：按 h0cheung 流程构建 `boot.img` + Arch rootfs，`fastboot boot` 验证；
+   记录 Q28 复现率。
+4. **ArmadaOS bootc 集成**：设备 overlay 接进 build_files/system_files
+   （UCM2/gamescope lua/传感器/电源件已在 `devices/lenovo-tb322fc/rootfs/` 就位待接）。
+5. **多启动验收**：kShimC STAR_CHART 出包 → Android 保留 + TF 卡 ArmadaOS。
+6. **游戏栈验收**：Turnip 档位、Steam/FEX/Proton 冒烟、刷新率档、触控校准、G9、音频、挂起。
 
 ## 头号风险
 
