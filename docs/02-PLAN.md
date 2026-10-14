@@ -1,43 +1,64 @@
-# 02 · 候选路线与待决策项
+# 02 · 路线与待决策项
+
+## 定位（调研后修正）
+
+四代内核/板件层已有人做到 ~90%（h0cheung/GEEKiDoS 的 `tb322fc-linux` 系、
+xiaquwan1001 的研究工作区）。**本项目的增量价值在发行版层**：ArmadaOS 的
+bootc 镜像、游戏栈（Steam/FEX/Proton）、设备 overlay，以及保留 Android 的多启动方案。
+不要重造内核层——直接 pin 并跟踪 h0cheung/tb322fc-linux-kernel（上游 GEEKiDoS/linux `v7.2-elden`）。
 
 ## 路线对比
 
-### A. 参照三代：fork armada + `tb322fc/` 设备目录（enij90 路径）
+### A. ArmadaOS 设备层（enij90 三代路径）
 
-- 结构照抄 `armada-tb321fu`：设备 overlay、audio_topology、disk_config、post_process。
-- 启动：stock/vendor ABL + Android boot 镜像；四代可额外利用 testkey 签名（免解锁）。
-- 优点：先例完整、与上游 bootc 架构一致；缺点：安装即擦 Android（除非接 B 的 kShimC）。
+- fork armada，加 `devices/lenovo-tb322fc`（或顶层 `tb322fc/` 目录，参照
+  armada-tb321fu 与 freedom 的目录组织）。
+- 内核 pin 到 `v7.2-elden` 系 + 发行版所需 config 增量（FEX/Proton 对内核的要求：
+  大页、namespace、手柄 udev 等，逐项对照 Odin 3 / tb321fu 的设备 config）。
+- 已知短板：enij90 式安装擦整机 → 与 B 组合解决。
 
-### B. 参照 freedom：kShimC 多启动（mydanyi 路径）
+### B. kShimC 多启动（mydanyi freedom 路径）
 
-- kShimC + STAR_CHART 菜单：Android / 内置 ArmadaOS / TF 卡 ArmadaOS / 高级启动。
-- freedom 的 tb323fu 目录结构（boot/kernel/rootfs/patches/diagnostics/tests）可直接当模板；
-  SM8850P→SM8750 的内核与固件差异要逐块替换。
-- 优点：保留 Android、TF 卡先试错；缺点：kShimC 本身要适配 elden 的引导参数。
+- kShimC + STAR_CHART：Android / 内置 ArmadaOS / TF 卡 ArmadaOS / 高级启动。
+- freedom 的 `devices/lenovo-tb323fu` 是结构模板；内核与固件换成 h0cheung pin。
+- 开发期收益巨大：TF 卡先试，不动机身 Android。
 
-### C. 纯主线 + 通用发行版（Fedora/postmarketOS 路线）
+### C. 纯 Arch/通用发行版
 
-- 等/推主线 DT 合入，用 pmOS 或 Fedora aarch64 通用镜像 + 自打包内核。
-- 优点：最干净、可反哺主线；缺点：离「能打游戏」最远，Wi-Fi/音频都缺。
+- h0cheung 的 CI 已能产 Arch Linux Ports Plasma 镜像——想先玩起来可以直接用他的产物，
+  但不是本项目目标（目标是 SteamOS-like 游戏栈）。
 
-**倾向：B 为主（双系统 + TF 卡开发期），A 的设备 overlay 组织方式做内容来源。**
-第一步不必决定死——先把 TF 卡能点亮为主线内核 + 简单 rootfs。
+**结论：A 的内容组织 + B 的启动方案 + h0cheung 的内核层。**
 
 ## 里程碑草案
 
-1. **设备指纹收集**：root 后抓 `/proc/config.gz`、`/sys/firmware/fdt`、`/proc/iomem`、
-   面板/触控实际型号（确认 CSOT vs BOE）、固件清单。（依赖 ll1zt 方案或 TWRP）
-2. **TF 卡起主线**：主线 + elden DT + initramfs，串口/ framebuffer 验证点亮。
-3. **下游补齐**：触摸、Turnip、Wi-Fi（cnss2 固件/board-2）、音频拓扑。
-4. **kShimC 双启动**：Android 保留 + ArmadaOS rootfs 进 userdata 子卷或 TF。
-5. **ArmadaOS 集成**：bootc 镜像 + 设备 overlay（刷新率档、触控校准、G9、音频、挂起）。
+1. **吃透现有 bring-up**：读 h0cheung/tb322fc-linux 的 `sources.json`/`firmware.json`/
+   `docs/*` 与 xiaquwan1001 的 `INDEX.md`/`PITFALLS.md`/`TASKS.md`；把 pin 表抄进 `SOURCES.md`。
+2. **复现 baseline**：按其 CI/手动流程构建 `boot.img` + Arch rootfs，`fastboot boot` 验证
+   （不写分区）；记录 Q28 冷启动竞态的复现率。
+3. **内核 config 差分**：对照 Armada 需求（FEX、InputPlumber、手柄、音频拓扑、命名空间）
+   在 `v7.2-elden` 基础上开 `armada` 层 config fragment。
+4. **ArmadaOS rootfs**：bootc 镜像最小化接入（先看 armada-tb321fu 的 build_files/
+   post_process/disk_config 怎么组织设备差异）。
+5. **kShimC 多启动**：给 elden 加设备定义，验证 Android 保留 + TF 卡 ArmadaOS。
+6. **游戏栈验收**：Turnip 档位（Stable/Devel/WinNative）、Steam/FEX/Proton 冒烟、
+   刷新率档位、触控校准、G9、音频、挂起。
+
+## 头号风险
+
+- **Q28 冷启动显示竞态**（xiaquwan1001 定性：bonded 双 DSI 首条 DCS 的 cmd-DMA hang，
+  三态判据 NOCARD/STORM/GOOD）。任何发行版都会撞上，跟进其 dossier，必要时参与修。
+- `#106` 亮屏进桌面后整机冻结（无栈，取证手段已装未抓到）。
+- 充电/电量上报问题未收口。
 
 ## 待决策 / 待验证
 
-- [ ] 屏供应商：国行 TB322FC 是否全是 CSOT `pp8807hb1-1`？有无 BOE 版本？（决定面板驱动工作量）
+- [ ] 内核基线 pin：`v7.2-elden` 具体 commit（h0cheung sources.json 里的 `09e22021`？）
+- [ ] h0cheung 与 xiaquwan1001 两条线的关系：是同组人的两份记录还是独立团队？
+      前者概率大（时间点、术语一致性），需确认再决定跟踪谁。
+- [ ] 与 h0cheung/xiaquwan1001 沟通：ArmadaOS 层是否有合作空间（至少同步 pin）。
 - [ ] 主线补丁合入状态：v2 之后是否进 `qcom-next`；盯 linux-arm-msm。
-- [ ] SM8750 GPU：Turnip 对 Adreno 830 的支持分支（Mesa devel / WinNative Turnip 构建）。
-- [ ] Wi-Fi 固件：ZUXOS 里 cnss2 所用 BDF / fw 版本，能否直接搬。
 - [ ] freedom 的 kShimC 是否已支持 SM8750 启动参数，或需给 elden 加设备定义。
-- [ ] G9 手柄四代兼容性（VID/PID 是否仍为 `3537:1136`）。
 - [ ] testkey 漏洞在出厂较新 ZUI（>1.5.10.138）是否已修——决定「免解锁」还是「先解锁」。
+- [ ] G9 手柄四代兼容性（VID/PID 是否仍为 `3537:1136`）。
+- [ ] 屏供应商：国行是否全 CSOT PP8807HB1；Q28 是否与面板批次相关。

@@ -1,7 +1,9 @@
 # 00 · 调研：Y700 Gen 4 (TB322FC) Linux / ArmadaOS 生态盘点
 
-调查日期：2026-10-14。结论先行：**还没有公开的「Y700 Gen4 ArmadaOS/裸机 Linux 发行版」移植仓库**，
-但主线内核、Android 侧内核、刷机工具链三条线都已经有实质性工作，拼一个移植的原材料基本齐了。
+调查日期：2026-10-14（GitHub API 复核后修正）。结论先行：**四代的主线 Linux bring-up
+已经有人在做，而且完成度不低**（h0cheung/GEEKiDoS、xiaquwan1001 至少两条活跃路线）；
+**还没有人做的是「ArmadaOS 发行版层」的适配**。对我们而言这意味着不需要从零做板级内核，
+重点是发行版集成与差异化（多启动、游戏栈）。
 
 ## 1. 主线内核：已有官方 DT 补丁（最重要）
 
@@ -19,14 +21,34 @@
 - 面板注意：上游 DT 写的是 `csot,pp8807hb1-1` + `novatek,nt36536`。
   三代 enij90 移植只支持 BOE（CSOT 黑屏），四代至少要确认国行屏的供应商分布——可能与三代相反。
 
-### 下游 / 社区内核树
+### 下游 / 社区内核树 —— 四代 bring-up 已在进行（重要更正）
 
+- **[h0cheung/tb322fc-linux](https://github.com/h0cheung/tb322fc-linux)**（活跃，2026-10-11 更新）：
+  umbrella 仓库，结构沿用 GUF296/tb321fu-linux 风格；内核在
+  [h0cheung/tb322fc-linux-kernel](https://github.com/h0cheung/tb322fc-linux-kernel)
+  （fork 自 GEEKiDoS/linux `v7.2-elden` 分支）。**实测已工作**：显示 24/40/60/90/120/144/165 Hz、
+  NT36536 触摸、Adreno 830（Mesa Turnip + Zink）、Wi-Fi（Peach/ath12k）、蓝牙、
+  扬声器（AW88461 + AudioReach 拓扑/UCM）、内置麦、双 AW86927 触觉、ADSP/SSC 传感器、
+  s2idle 挂起；摄像头部分可用；剩余问题在充电唤醒/电量上报与休眠到盘。
+  CI 可直接产出 Arch Linux Ports Plasma 的 `boot.img` + `rootfs.img`（尚需固件配套验证）。
+- **[GEEKiDoS/tb322fc-linux](https://github.com/GEEKiDoS/tb322fc-linux)**（2026-09-12 创建）：
+  同一 umbrella 的先驱版本，内核开发在其 linux 仓库 `v7.2-elden` 分支；README 明确说明结构
+  沿袭 tb321fu-linux，h0cheung 版是其后继/协作 fork（状态更新到 BT、suspend、mic 已验证）。
+- **[xiaquwan1001/lenovo-legion-y700-gen4-tb322fc-elden-linux](https://github.com/xiaquwan1001/lenovo-legion-y700-gen4-tb322fc-elden-linux)**
+  （2026-10-10 建，研究记录型工作区，中文文档极详细）：
+  目标 G1 完整上游 Linux（自称 ≈90%，27/30 项可用）、G2 Waydroid 安卓容器（≈50%，
+  容器传感器 HAL 已打通）、G3 Box64+Wine/Steam（PoC 已过）。
+  **关键已知问题**：`Q28` 冷启动显示竞态（bonded 双 DSI 首条 DCS 命令的 cmd-DMA hang，
+  表现为 NOCARD/STORM/GOOD 三态）、`#106` 亮屏进桌面后整机卡死、`Q24` 相机×熄屏互斥。
+  其 `PITFALLS.md`（170+ 条踩坑）和 `q28-DOSSIER` 是四代显示子系统最值钱的一手资料。
 - [sunflower2333/linux](https://github.com/sunflower2333/linux)：release `26.08.13.43`
-  含 `arm64: dts: qcom: add dummy dts for legion y700 gen4.`
-  （`sm8750-lenovo-y700-gen4.dts`，1018 行）——SM8750 社区树里的四代 DTS。
+  含 `sm8750-lenovo-y700-gen4.dts`（1018 行）。
   commit: https://github.com/sunflower2333/linux/commit/f4b4bf129702d16ef5a61933d493161063e7cb4d
 - [sm8750-mainline/linux](https://github.com/sm8750-mainline/linux)：SM8750 主线化组织 fork（默认分支 v6.16），
   SM8750 SoC 级支持的主要来源。
+- 同 SoC 参照：[GUF296/xiaomi-pad-8-pro-linux](https://github.com/GUF296/xiaomi-pad-8-pro-linux)
+  （三代作者 GUF296 现在做 Xiaomi Pad 8 Pro "piano" 的 Ubuntu——同为 SM8750 系平板，
+  其 ADSP/SSC 传感器、音频拓扑打包件可对照）。
 
 ## 2. Android 侧（root / 容器 / Recovery，可复用的启动链知识）
 
@@ -38,6 +60,12 @@
   - KMI 契约要求精确 clang r510928；`CONFIG_SYSVIPC` 需 kABI 补丁。
 - [polygraphene/android_device_lenovo_TB322FC](https://github.com/polygraphene/android_device_lenovo_TB322FC)：
   TWRP（twrp-16.0），有 release。注明 ZUI ≤ 1.5.10.138 可用 testkey 漏洞免解锁经 EDL 刷入。
+- 定制 ROM 侧：[lolipuru/android_device_lenovo_elden](https://github.com/lolipuru/android_device_lenovo_elden)
+  + [lenovo-basements](https://github.com/lenovo-basements) org（`android_device_lenovo_elden-kernel`、
+  `proprietary_vendor_lenovo_elden`）——AOSP 系 device/vendor 树已有人搭。
+- 周边工具：[l11223/geekflash](https://github.com/l11223/geekflash)（macOS EDL 刷机 GUI）、
+  [18027972083/y700-flash-guide](https://github.com/18027972083/y700-flash-guide)（9008/QDL + vbmeta 笔记）、
+  [aweiyry/lenovo-ota-tool](https://github.com/aweiyry/lenovo-ota-tool)（三代/四代/五代 OTA 分区提取）。
 - [miner7222/LTBox](https://github.com/miner7222/LTBox)：跨平台刷机 GUI，支持 TB322FC
   （EDL 写分区、root、救砖；TB323FU/TB324ZC 反而限制更多——四代是工具链支持较好的一代）。
 - 酷安 GUF26 的澎湃 OS 3 移植 + 虹墨空间站教程（https://www.imaegoo.com/2026/y700-tb322fc-flash-hyper/）：
@@ -74,11 +102,15 @@
 |---|---|---|
 | 主线 DT | ✅ 补丁在审（v2，2026-07-26） | Pengyu Luo（+ guf296 参与） |
 | SM8750 SoC 主线化 | ✅ 社区 org 活跃 | sm8750-mainline、sunflower2333 等 |
-| ArmadaOS 四代移植 | ❌ 无公开仓库 | 本仓库要填的空 |
+| **四代主线 Linux bring-up** | ✅ **已在做，≈90% 子系统可用** | **h0cheung/GEEKiDoS（tb322fc-linux，10-11 活跃）；xiaquwan1001（研究型工作区）** |
+| **ArmadaOS 四代移植** | ❌ 无公开仓库 | **本仓库要填的空——但应站在上面两个 bring-up 之上，别重造内核层** |
 | ArmadaOS 三代移植 | ✅ 高完成度 | enij90/armada-tb321fu |
 | ArmadaOS 五代/平板 multiboot | ✅ 进行中 | mydanyi/armadaos-freedom（tb323fu） |
-| Android root/容器/Recovery | ✅ 可用 | ll1zt、polygraphene、LTBox |
+| Android root/容器/Recovery/ROM | ✅ 可用 | ll1zt、polygraphene、LTBox、lolipuru、lenovo-basements |
 | UEFI (edk2) | ❌ 无 elden 配置 | — |
 
-窗口期判断：主线 DT 在路上 + Odin 3 已验证 SM8750 + 四代 BL/testkey/EDL 全通，
-现在做 `devices/lenovo-tb322fc` 的时机比当年做三代时好得多。
+定位修正：四代不是「没人做」而是「**内核/板件层有人做到九成，发行版/游戏栈层没人接**」。
+合理切入点是直接复用 h0cheung/tb322fc-linux（或其上游 GEEKiDoS/linux `v7.2-elden`）的内核与
+固件清单，在其上套 ArmadaOS rootfs/bootc 层 + freedom 的 kShimC 多启动；
+并优先消化 xiaquwan1001 记录的 Q28 冷启动显示竞态——那是四代目前最大的硬伤，
+任何发行版都会撞上。

@@ -7,6 +7,9 @@ ArmadaOS（SteamOS-like ARM Linux）适配 Lenovo Legion Y700 Gen 4 / Legion Tab
 > 当前处于调研 / 启动阶段：仓库只有文档与来源跟踪，没有可刷镜像。
 > 上游 [armada-os/armada](https://github.com/armada-os/armada) 官方支持列表不含任何平板；
 > 本移植与上游无关，问题请提到本仓库，不要去官方 Armada 报。
+>
+> **四代的主线 Linux bring-up 已有人在做**（h0cheung/GEEKiDoS、xiaquwan1001，
+> 完成度已很高），缺的是 **ArmadaOS 发行版层**的适配——见 `docs/00-RESEARCH.md` §5。
 
 ## 设备
 
