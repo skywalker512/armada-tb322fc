@@ -12,6 +12,14 @@
 | `repack_boot_v4.py` | boot v4 窄重打包（与 tb323fu 共用，设备无关） |
 | `menu-required-text.txt` | 中英文菜单字形清单（WenKai 子集；菜单文案若改需重新生成） |
 
+## 依赖
+
+- `cmake`、`ninja`、`aarch64-linux-gnu-gcc`/`binutils`（runtime 构建）
+- `python3` + `kconfiglib`
+- `qemu-system-aarch64`（`manifest_qemu.py`）
+- `dtc` + `fdtget`/`fdtput`（`manifest_qemu.py`、`build_offline_boot.py`、`payload_from.py`）
+- `git`
+
 ## 输入（`inputs/`，不入库）
 
 | 输入 | 来源 |
@@ -29,7 +37,8 @@
 克隆为 `source/` 的兄弟目录 `MultiBootKernelPatcher`，检出上游基线
 `2276163d`，再用 `PATCHES_DIR`（默认 `/work/patches-boot`，可指向仓库
 `devices/lenovo-tb323fu/patches/boot/`）施加 freedom 的本地基线 mbox
-与共享 PayloadFrom 补丁。
+与共享 PayloadFrom 补丁。`git am` 使用脚本内置的占位 committer identity，
+重复执行会跳过已应用的补丁。
 
 ## 验收门槛（evidence/）
 

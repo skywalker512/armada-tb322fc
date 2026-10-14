@@ -1,9 +1,11 @@
 -- Lenovo Legion Y700 Gen 4 (TB322FC, "elden") internal LCD: CSOT PP8807HB1.
 -- Panel exposes no EDID; gamescope synthesizes one (gamescope patch 0002)
 -- and this profile supplies the identity it lacks.
--- HDR values and primaries are model-level constants from the downstream DT
--- (qcom,mdss-dsi-panel-hdr-*), adapted from h0cheung/tb322fc-linux
--- packages/gamescope-armada/csot.pp8807hb1-1.lua.
+-- HDR values and gamut are taken from h0cheung/tb322fc-linux
+-- packages/gamescope-armada/csot.pp8807hb1-1.lua, whose comments attribute
+-- them to the Android vendor DT's qcom,mdss-dsi-panel-hdr-* properties.
+-- The mainline elden.dts does not carry those properties; this repo has not
+-- independently verified them.
 gamescope.config.known_displays.armada_lenovo_tb322fc_lcd = {
 	pretty_name = "CSOT PP8807HB1 (Lenovo Y700 Gen 4)",
 	hdr = {

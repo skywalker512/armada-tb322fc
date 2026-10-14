@@ -1,9 +1,9 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/composite_device_v1.json
 # Lenovo Legion Y700 Gen 4 (TB322FC, "elden") with an attachable Legion
-# controller. UNVERIFIED: the G9 variant and VID/PID for this generation have
-# not been confirmed on hardware; profile follows the TB323FU G9 2026
-# (3537:1136) as the closest known sibling. Update the evdev match once a
-# real unit's `udevadm info` is captured.
+# controller. The Gen 4 (2025) bundled controller is the Legion G9
+# (3537:1134, same as Gen 3; enij90 profile). The G9 2026 (3537:1136) also
+# physically connects, so it is listed too. Neither has been re-verified on
+# this generation's hardware.
 version: 1
 kind: CompositeDevice
 name: Lenovo Legion Y700 Gen 4 (TB322FC) + Legion G9
@@ -13,13 +13,15 @@ matches:
       attributes:
         - name: model
           value: Lenovo Legion Y700 Gen4
-  - udev:
-      sys_path: /sys/firmware/devicetree/base
-      attributes:
-        - name: model
-          value: Lenovo Legion Y700 Gen 4 (TB322FC)
 single_source: false
 source_devices:
+  - group: gamepad
+    evdev:
+      name: GameSir Legion Gaming Controller G9
+      vendor_id: "3537"
+      product_id: "1134"
+      handler: event*
+    capability_map_id: lenovo_legion_g9
   - group: gamepad
     evdev:
       name: GameSir Legion Gaming Controller G9 2026

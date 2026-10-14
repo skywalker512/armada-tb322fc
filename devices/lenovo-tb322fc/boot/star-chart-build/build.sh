@@ -43,10 +43,15 @@ if [ ! -d MultiBootKernelPatcher/.git ]; then
 fi
 git -C MultiBootKernelPatcher fetch origin "$PACKER_BASELINE" || true
 step packer-checkout git -C MultiBootKernelPatcher checkout --detach "$PACKER_BASELINE"
-if [ -f "$PATCHES_DIR/0001-patcher-local-commits.mbox" ]; then
-    step packer-mbox git -C MultiBootKernelPatcher am "$PATCHES_DIR/0001-patcher-local-commits.mbox"
+if [ -f "$PATCHES_DIR/0001-patcher-local-commits.mbox" ] &&
+    [ "$(git -C MultiBootKernelPatcher log -1 --format=%s)" != \
+        "fix: enforce eight-byte device tree alignment" ]; then
+    step packer-mbox git -c user.name=armada-tb322fc -c user.email=build@localhost \
+        -C MultiBootKernelPatcher am "$PATCHES_DIR/0001-patcher-local-commits.mbox"
 fi
-if [ -f "$PATCHES_DIR/0002-patcher-shared-payload-working-tree.patch" ]; then
+if [ -f "$PATCHES_DIR/0002-patcher-shared-payload-working-tree.patch" ] &&
+    ! git -C MultiBootKernelPatcher apply -R --check \
+        "$PATCHES_DIR/0002-patcher-shared-payload-working-tree.patch" >/dev/null 2>&1; then
     step packer-patch git -C MultiBootKernelPatcher apply \
         "$PATCHES_DIR/0002-patcher-shared-payload-working-tree.patch"
 fi
@@ -56,7 +61,10 @@ step qemu python3 source/tests/manifest_qemu.py \
 
 # PayloadFrom 契约回归（针对刚构建的 packer；需要 dtc）
 if [ -f "$PATCHES_DIR/payload_from.py" ] && command -v dtc >/dev/null 2>&1; then
-    step payload-contract python3 "$PATCHES_DIR/payload_from.py"
+    step payload-contract python3 "$PATCHES_DIR/payload_from.py" \
+        --packer qemu-manifest/packer/MultiBootKernelPatcher \
+        --unpacker qemu-manifest/packer/UnpackTool \
+        --out payload-contract
 fi
 
 # 4. 离线 boot 组装 + 校验（stock boot/img、Linux Image、双 DTB、avbtool）
