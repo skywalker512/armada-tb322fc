@@ -1,42 +1,46 @@
-# STAR_CHART 构建骨架（elden）
+# STAR_CHART 打包配方（elden / TB322FC）
 
-沿用 freedom `devices/lenovo-tb323fu/boot/star-chart-build/` 的配方约定，
-本目录暂不含可一键出包流程——先把 kShimC 源码 pin 与 elden 设备文件层定下来。
+沿用 freedom `devices/lenovo-tb323fu/boot/star-chart-build/` 的契约，
+脚本已就位但**尚未用真机输入跑通过**——以下输入均需自行从设备/OTA 提取。
 
-## 预期工作区（容器内）
+## 文件
 
-```text
-/work/
-  source/                 # sunflower2333/kShimC feature/2610 + 固定依赖
-                          # (CrDK b6c33351 + ports/crdk 补丁、picolibc f7edb086、
-                          #  lvgl 7f07a129、lib/libfdt)
-  overlay/elden/          # 本仓 boot/kshim-elden/：elden_defconfig、
-                          # elden_ramoops*.c、设备专属 dt 片段
-  inputs/
-    boot-stock.img        # 原厂 boot（自行从设备/OTA 包提取）
-    Image.stock
-    Image.linux           # v7.2-elden 内核 Image
-    tf.dtb / internal.dtb # elden payload dtb（TF / 内置 两种启动目标）
-    avbtool.py
-  out/
-```
+| 文件 | 用途 |
+|---|---|
+| `build.sh` | `/work` 流水线：runtime → packer 准备 → QEMU manifest → boot 组装校验 |
+| `build_offline_boot.py` | 八条目 manifest 组装与校验（条目名已改 TB322FC；`KSHIM_BOOT_SIZE` 可调 boot 分区大小，默认 96 MiB **待真机 GPT 核实**） |
+| `repack_boot_v4.py` | boot v4 窄重打包（与 tb323fu 共用，设备无关） |
+| `menu-required-text.txt` | 中英文菜单字形清单（WenKai 子集；菜单文案若改需重新生成） |
 
-## 与 tb323fu 流程的差异
+## 输入（`inputs/`，不入库）
 
-- runtime 槽位 4 MiB 限制不变；elden boot 分区大小按 stock `boot-stock.img` 实测核对。
-- 菜单 manifest 条目改 elden 语义：Android(ZUXOS) / ArmadaOS 内置 / ArmadaOS TF /
-  高级启动（Linux 诊断、Recovery、Fastboot、9008）。
-- `menu-required-text.txt` 字形清单按新文案重新生成（WenKai 子集）。
-- 打包器：DualBootKernelPatcher feature/2610 + freedom `patches/boot/` 的共享
-  PayloadFrom 修改；对 elden 的 Android payload 结构（GKI2 vendor_boot 分离、
-  init_boot）逐项核对后再用。
+| 输入 | 来源 |
+|---|---|
+| `boot-stock.img` | 原厂 boot 分区完整 dump（需等于 boot 分区大小） |
+| `Image.stock` | stock boot 内的原始内核 Image |
+| `Image.linux` | h0cheung `v7.2-elden` 系内核 Image |
+| `internal.dtb` | Linux payload DTB，须含 `/chosen` 的 `armada,boot-stage="os"` |
+| `tf.dtb` | TF 卡启动用 DTB（同 contract） |
+| `avbtool.py` | AOSP avbtool（testkey 重签） |
 
-## TODO
+## 打包器
 
-- [ ] 真机取输入（见 `../README.md`）
-- [x] `elden_defconfig` + `../fetch-kshim.sh` + `../kshim-elden/patches/`
-      runtime 构建冒烟 **本机已 PASS**（4 MiB 精确、无未定义符号；
-      macOS aarch64-elf-gcc 经 0002 env 覆盖补丁）。
-      CI 冒烟同走 `.github/workflows/kshim-elden.yml`；跑通后回填 `KSHIM_COMMIT` sha
-- [ ] QEMU manifest 流程对 elden 复用（`tests/manifest_qemu.py`）
-- [ ] boot v4 重打包结构对 TB322FC boot.img 验证（`repack_boot_v4.py`）
+`build.sh` 会把 [Project-Aloha/DualBootKernelPatcher `feature/2610`](https://github.com/Project-Aloha/DualBootKernelPatcher/tree/feature/2610)
+克隆为 `source/` 的兄弟目录 `MultiBootKernelPatcher`，检出上游基线
+`2276163d`，再用 `PATCHES_DIR`（默认 `/work/patches-boot`，可指向仓库
+`devices/lenovo-tb323fu/patches/boot/`）施加 freedom 的本地基线 mbox
+与共享 PayloadFrom 补丁。
+
+## 验收门槛（evidence/）
+
+`build.sh` 每步写 `evidence/<step>.log` + `.exit`。产物须通过
+`build_offline_boot.py` 内置的 pack→unpack→repack 回读校验；
+即便如此，`validation.json` 恒为 `hardware_tested:false`——
+真机验收路径只能是 `fastboot boot`（**禁止直接刷分区**）：
+
+- [ ] `fastboot boot boot-candidate/…img` 进入 STAR_CHART 菜单
+- [ ] 菜单按键导航（PMIC 键；触摸驱动未移植）
+- [ ] Android 条目 → 回原厂系统
+- [ ] 机身 ArmadaOS 条目 → Linux 内置启动
+- [ ] TF 卡 ArmadaOS 条目 → TF 启动
+- [ ] 高级启动各动作（诊断/Recovery/Fastboot/9008）逐项验收后再标可用
