@@ -807,6 +807,8 @@ The board devicetree ships as `dts/sm8750-lenovo-elden.dts` (no patch); its `sm8
 
 `0800`-`0802` are intentionally omitted: h0cheung distro-only changes (Android wrapped-key userdata fscrypt/dm-default-key, an ntsync selftest fix, and distro `.config` fragments) that would alter the common kernel for all devices.
 
+`0831` and `0846` are intentionally omitted: elden's "floor the SM8750 GMU rails low pre sync_state" and the 0001 rpmhpd split are semantically identical to armada `0121` (presync_floor field, gfx_gmu/gmxc_sm8750 structs, sm8750 table switch, to_active_sleep handling). Their remaining hunks were unsafe for other devices — `0831` switched the kaanapali table to the SM8750-specific structs and `0846` set `presync_floor` on the base `gfx`/`gmxc` structs used by ~20 other SoCs; Armada deliberately scopes the floor to the SM8750 GMU variants only.
+
 - `patches/0803-drm-msm-dpu-restore-the-core-clock-OPP-before-runtim.patch`
   source: https://github.com/h0cheung/tb322fc-linux-kernel
   upstream: local (elden pin 6f97250ead15)
@@ -947,10 +949,7 @@ The board devicetree ships as `dts/sm8750-lenovo-elden.dts` (no patch); its `sm8
   upstream: local (elden pin 6f97250ead15)
   notes: usb: typec: ucsi: Y700: let a USB-less power source
 
-- `patches/0831-pmdomain-qcom-rpmhpd-floor-the-SM8750-GMU-rails-low-.patch`
-  source: https://github.com/h0cheung/tb322fc-linux-kernel
-  upstream: local (elden pin 6f97250ead15)
-  notes: pmdomain: qcom: rpmhpd: floor the SM8750 GMU rails low
+
 
 - `patches/0832-drm-msm-dpu-stop-the-video-pipeline-before-the-timin.patch`
   source: https://github.com/h0cheung/tb322fc-linux-kernel
@@ -967,15 +966,9 @@ The board devicetree ships as `dts/sm8750-lenovo-elden.dts` (no patch); its `sm8
   upstream: local (elden pin 6f97250ead15)
   notes: ASoC: qcom: q6apm-lpass-dais: start the MI2S BE graph
 
-- `patches/0835-drm-msm-dpu-sm8750-add-the-missing-DSI-GC-gamma-sub-.patch`
-  source: https://github.com/h0cheung/tb322fc-linux-kernel
-  upstream: local (elden pin 6f97250ead15)
-  notes: drm/msm/dpu: sm8750: add the missing DSI GC (gamma)
+`0835` is intentionally omitted: it wires the SM8750 DSPP GC as a legacy v1.8 register block (base 0x17c0), contradicting Armada `0068` ("GC v2 on this DSPP is a LUT bus block and is not wired up yet"). The catalog entry is shared by every SM8750 device, so it stays out of the common kernel until validated on hardware. Effect on elden: no CRTC GAMMA_LUT (Night Light / colour temperature via KMS unavailable).
 
-- `patches/0836-drm-msm-dsi-round-the-6G-byte-clock-to-a-PLL-achieva.patch`
-  source: https://github.com/h0cheung/tb322fc-linux-kernel
-  upstream: local (elden pin 6f97250ead15)
-  notes: drm/msm/dsi: round the 6G byte clock to a
+`0836` is intentionally omitted: it inserted elden's byte-clock rounding block ungated into `dsi_link_clk_enable_6g`, while the elden pin's actual implementation — gated on `qcom,sm8750-dsi-ctrl` inside `dsi_link_clk_set_rate_6g_v2_9` — is already delivered verbatim by `0840`. Keeping 0836 would run the same rounding twice on SM8750 and would also evaluate it on every other 6G DSI host.
 
 - `patches/0837-elden-dt-bindings-bindings-for-Y700-Gen4-hardware.patch`
   source: https://github.com/h0cheung/tb322fc-linux-kernel
@@ -1022,10 +1015,7 @@ The board devicetree ships as `dts/sm8750-lenovo-elden.dts` (no patch); its `sm8
   upstream: local (elden pin 6f97250ead15)
   notes: elden: pcie: qcom controller and qmp phy changes
 
-- `patches/0846-elden-pmdomain-rpmhpd-presync-floor.patch`
-  source: https://github.com/h0cheung/tb322fc-linux-kernel
-  upstream: local (elden pin 6f97250ead15)
-  notes: elden: pmdomain: rpmhpd presync floor
+
 
 - `patches/0847-elden-power-WCN7861-pwrseq-wl2868c-regulator-battmgr.patch`
   source: https://github.com/h0cheung/tb322fc-linux-kernel

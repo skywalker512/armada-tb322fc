@@ -229,6 +229,13 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 # (Android wrapped-key userdata fscrypt/dm-default-key, selftests fixup,
 # distro config fragments) that would alter the common kernel for all
 # devices or are unused by the Armada boot chain.
+# 0835 intentionally omitted: wires sm8750 DSPP GC as a legacy v1.8 register
+# block, contradicting Armada 0068 (GC v2 on this DSPP is a LUT-bus block);
+# the catalog entry is shared by every SM8750 device. Revisit on hardware.
+# 0831, 0846 intentionally omitted: identical to 0121's presync_floor
+# feature (gfx_gmu/gmxc_sm8750 + sm8750 table switch); elden's copies
+# would only re-define the structs and flip the unrelated kaanapali
+# table / base gfx/gmxc structs, changing non-elden devices.
 0803-drm-msm-dpu-restore-the-core-clock-OPP-before-runtim.patch
 0804-clk-qcom-gdsc-pair-the-GX-do-nothing-enable-with-a-m.patch
 0805-media-platform-qcom-iris-defer-CAPTURE-queue-bring-u.patch
@@ -257,12 +264,10 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0828-firmware-psci-map-reboot-reason-to-SM8750-SYSTEM_RES.patch
 0829-power-supply-qcom_battmgr-omit-SM8750-maximum-load-p.patch
 0830-usb-typec-ucsi-Y700-let-a-USB-less-power-source-yiel.patch
-0831-pmdomain-qcom-rpmhpd-floor-the-SM8750-GMU-rails-low-.patch
 0832-drm-msm-dpu-stop-the-video-pipeline-before-the-timin.patch
 0833-power-supply-qcom_battmgr-poll-battery-capacity-peri.patch
 0834-ASoC-qcom-q6apm-lpass-dais-start-the-MI2S-BE-graph-a.patch
-0835-drm-msm-dpu-sm8750-add-the-missing-DSI-GC-gamma-sub-.patch
-0836-drm-msm-dsi-round-the-6G-byte-clock-to-a-PLL-achieva.patch
+# 0836 intentionally omitted: misanchored duplicate of 0840's sm8750-gated block
 0837-elden-dt-bindings-bindings-for-Y700-Gen4-hardware.patch
 0838-elden-arm64-clk-sm8750-platform-plumbing-for-Y700-Ge.patch
 0839-elden-bluetooth-WCN7861-Peach-support.patch
@@ -272,7 +277,6 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0843-elden-media-sm8750-camss-sensor-drivers-cci-halt.patch
 0844-elden-ath12k-WCN7861-hw-entry-and-QDSS-trace-config.patch
 0845-elden-pcie-qcom-controller-and-qmp-phy-changes.patch
-0846-elden-pmdomain-rpmhpd-presync-floor.patch
 0847-elden-power-WCN7861-pwrseq-wl2868c-regulator-battmgr.patch
 0848-elden-usb-dwc3-dual-port-handover-and-s2idle-host-mo.patch
 0849-elden-sound-aw88461-codec-and-audioreach-q6apm-updat.patch

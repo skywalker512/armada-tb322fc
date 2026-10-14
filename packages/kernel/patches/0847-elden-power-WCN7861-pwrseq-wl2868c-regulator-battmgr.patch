@@ -9,7 +9,7 @@ compatible alongside Armada's WCN7860
 ---
  drivers/power/sequencing/Kconfig           |   1 +
  drivers/power/sequencing/pwrseq-qcom-wcn.c | 698 ++++++++++++++++++++-
- drivers/power/supply/qcom_battmgr.c        | 111 +++-
+ drivers/power/supply/qcom_battmgr.c        | 94 +++-
  drivers/regulator/Kconfig                  |  11 +
  drivers/regulator/Makefile                 |   1 +
  drivers/regulator/wl2868c-regulator.c      | 140 +++++
@@ -969,7 +969,7 @@ index 34e7c4847..814f3c1de 100644
  		case USB_INPUT_CURR_LIMIT:
  			battmgr->usb.current_limit = le32_to_cpu(resp->intval.value);
  			break;
-@@ -1664,9 +1742,38 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
+@@ -1664,9 +1742,21 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
  	};
  	int ret;
  
@@ -989,23 +989,6 @@ index 34e7c4847..814f3c1de 100644
 +	}
 +out:
 +	mutex_unlock(&battmgr->lock);
-+}
-+
-+/*
-+ * The ADSP firmware does not push periodic battery updates; the percentage
-+ * only moves when something reads sysfs (which triggers a property GET to
-+ * the firmware). While a game is running nothing reads the battery, so the
-+ * percentage freezes and low-battery warnings never fire.
-+ */
-+static void qcom_battmgr_poll_work(struct work_struct *work)
-+{
-+	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr,
-+						    poll_work.work);
-+
-+	qcom_battmgr_bat_sm8350_update(battmgr, POWER_SUPPLY_PROP_CAPACITY);
-+	power_supply_changed(battmgr->bat_psy);
-+
-+	schedule_delayed_work(&battmgr->poll_work, 30 * HZ);
  }
  
  /*

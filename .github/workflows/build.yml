@@ -1,10 +1,9 @@
 ---
 name: Build images
 on:
-  push:
-    branches:
-      - main
-      - staging
+  # Push trigger disabled in this fork: no SIGNING_SECRET is configured, so the
+  # container job refuses to publish and every push burned the full package
+  # build. Run manually once signing is set up.
   workflow_dispatch:
 
 env:
