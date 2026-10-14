@@ -35,13 +35,21 @@ bootc 镜像、游戏栈（Steam/FEX/Proton）、设备 overlay，以及保留 A
 1. ~~吃透现有 bring-up~~ ✅ 2026-10-14：pin 表与起步文件已落 `devices/lenovo-tb322fc/`
    （`sources.json`/`firmware.json`/`kernel/`/`rootfs/`/`patches/`，来自 h0cheung pin）。
    另发现 h0cheung `packages/` 已是 Arch 版 Armada 用户态全套——bootc 集成时可对照。
-2. **kShimC elden 适配**（进行中）：`boot/kshim-elden/elden_defconfig` 草稿已建；
-   待真机 fdt/iomem 提取后定稿 ramoops/reserved-memory/PMIC 参数。
-   菜单触摸初版关闭（NT36536 驱动未移植），走 PMIC 按键。
+2. **kShimC elden 适配**（进行中）：runtime 已可构建——`elden_defconfig`
+   本机（aarch64-elf-gcc）与 CI（ubuntu aarch64-linux-gnu-gcc，`kshim-elden.yml`）
+   均产出精确 4 MiB、无未解析符号的 `kShimC.bin`（hash 因编译器不同而异，见
+   `boot/README.md`）。剩余：payload 打包（stock boot.img/DTB、avbtool、
+   MultiBootKernelPatcher、UnpackTool 均为本地输入，不入库）→ `fastboot boot`
+   验收菜单 → 定稿 ramoops/PMIC 参数。菜单触摸初版关闭（NT36536 驱动未移植），走 PMIC 按键。
 3. **复现 baseline**：按 h0cheung 流程构建 `boot.img` + Arch rootfs，`fastboot boot` 验证；
    记录 Q28 复现率。
-4. **ArmadaOS bootc 集成**：设备 overlay 接进 build_files/system_files
-   （UCM2/gamescope lua/传感器/电源件已在 `devices/lenovo-tb322fc/rootfs/` 就位待接）。
+4. **ArmadaOS bootc 集成**：设备层已注册进 Armada 用户态——
+   `system_files/usr/libexec/armada/device-env` 识别 elden model 字符串，
+   `usr/lib/armada/devices/lenovo-tb322fc.conf`（SM8750 拓扑继承共享默认、
+   NT36536 触摸、s2idle）、gamescope `lenovo.tb322fc.lcd.lua`（CSOT PP8807HB1）、
+   InputPlumber `06-lenovo-tb322fc-legion-g9.yaml`（VID/PID 待真机复核）。
+   已验证：device-env 解析正确、`controller-profile-test` 通过。
+   剩余：bootc 镜像构建 + rootfs 件接线（`devices/lenovo-tb322fc/rootfs/`）。
 5. **多启动验收**：kShimC STAR_CHART 出包 → Android 保留 + TF 卡 ArmadaOS。
 6. **游戏栈验收**：Turnip 档位、Steam/FEX/Proton 冒烟、刷新率档、触控校准、G9、音频、挂起。
 
@@ -59,7 +67,8 @@ bootc 镜像、游戏栈（Steam/FEX/Proton）、设备 overlay，以及保留 A
       前者概率大（时间点、术语一致性），需确认再决定跟踪谁。
 - [ ] 与 h0cheung/xiaquwan1001 沟通：ArmadaOS 层是否有合作空间（至少同步 pin）。
 - [ ] 主线补丁合入状态：v2 之后是否进 `qcom-next`；盯 linux-arm-msm。
-- [ ] freedom 的 kShimC 是否已支持 SM8750 启动参数，或需给 elden 加设备定义。
+- [x] ~~freedom 的 kShimC 是否已支持 SM8750 启动参数~~ → 已答：加 `elden_defconfig`
+      + tlmm(216) 按键布局补丁即可，runtime 构建 PASS；真机启动行为仍待验证。
 - [ ] testkey 漏洞在出厂较新 ZUI（>1.5.10.138）是否已修——决定「免解锁」还是「先解锁」。
 - [ ] G9 手柄四代兼容性（VID/PID 是否仍为 `3537:1136`）。
 - [ ] 屏供应商：国行是否全 CSOT PP8807HB1；Q28 是否与面板批次相关。

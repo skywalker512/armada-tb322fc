@@ -40,9 +40,13 @@ STAR_CHART 菜单（中/英），按选择把控制权交给 Android payload 内
 ## 构建冒烟（2026-10-14 已验证）
 
 `fetch-kshim.sh` 拉取 pin 定源码 → `build_runtime.py` 用 `elden_defconfig`
-构建 **PASS**：`kShimC.bin` 精确 4 MiB、无未解析符号
-（sha256 `65792e8e…a0b6`，本机 macOS + aarch64-elf-gcc 16.2，
-经 `kshim-elden/patches/0002` env 工具链覆盖）。
+构建 **PASS**：`kShimC.bin` 精确 4 MiB、无未解析符号。
+
+- 本机 macOS + aarch64-elf-gcc 16.2：sha256 `65792e8e…a0b6`
+  （经 `kshim-elden/patches/0002` env 工具链覆盖）。
+- CI ubuntu-24.04 + aarch64-linux-gnu-gcc：sha256 `a458cbb6…e7d3`，
+  workflow `kshim-elden.yml`（push/手动触发，产物上传为 artifact）。
+  两边编译器版本不同，二进制 hash 不一致属预期。
 
 ```sh
 devices/lenovo-tb322fc/boot/fetch-kshim.sh /tmp/kshim-elden
