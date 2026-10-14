@@ -16,16 +16,23 @@ jobs:
       - name: toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu cmake ninja-build python3
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            cmake ninja-build python3 python3-pip
+          python3 -m pip install --break-system-packages kconfiglib
 
       - name: materialize kShimC workspace
         run: devices/lenovo-tb322fc/boot/fetch-kshim.sh "$PWD/.work-kshim"
 
       - name: build elden runtime (4 MiB manifest slot)
         run: |
-          python3 .work-kshim/source/tools/build_runtime.py \
+          if ! python3 .work-kshim/source/tools/build_runtime.py \
             --config .work-kshim/source/configs/elden_defconfig \
-            --out "$PWD/.work-kshim/out/runtime" --jobs "$(nproc)"
+            --out "$PWD/.work-kshim/out/runtime" --jobs "$(nproc)"; then
+            for f in "$PWD"/.work-kshim/out/runtime/*.log; do
+              echo "== $f"; tail -n 80 "$f"
+            done
+            exit 1
+          fi
           cat "$PWD/.work-kshim/out/runtime/validation.json"
 
       - uses: actions/upload-artifact@v4
