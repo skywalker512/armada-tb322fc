@@ -1,0 +1,840 @@
+#!/usr/bin/python3
+"""Install the running Armada image alongside Android on internal storage."""
+
+import argparse
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
+import fcntl
+import hashlib
+import html
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+MIB = 1024**2
+GIB = 1024**3
+ESP_SIZE, BOOT_SIZE, ROOT_MIN, ANDROID_MIN = 512 * MIB, GIB, 32 * GIB, 8 * GIB
+RESERVE = ESP_SIZE + BOOT_SIZE + ROOT_MIN + 64 * MIB
+ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+LINUX_TYPE = "0fc63daf-8483-4772-8e79-3d69d8477de4"
+BTRFS_OPTS = "noatime,compress=zstd:1,discard=async"
+SELF = "/usr/libexec/armada/armada-installer"
+BOOTIMG = "/usr/libexec/armada/armada-bootimg-update"
+RECOVERY = ("To retry from SD, select SD as the boot source in ABL and re-run the installer. "
+            "To abandon the internal installation, select UNINSTALL CFW in ABL.")
+
+
+class Error(Exception):
+    pass
+
+
+class Cancelled(Exception):
+    pass
+
+
+class Interrupted(Error):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__(f"operation interrupted by signal {signum}")
+
+
+def run(*args, capture=False, check=True, input=None, **kwargs):
+    args = [str(arg) for arg in args]
+    kwargs.setdefault("stdout", subprocess.PIPE if capture else None)
+    kwargs.setdefault("stderr", subprocess.PIPE if capture else None)
+    if input is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    child = subprocess.Popen(args, text=True, **kwargs)
+    previous, interrupted = {}, []
+
+    def forward(signum, _frame):
+        interrupted.append(signum)
+        child.send_signal(signum)
+
+    try:
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, forward)
+        out, err = child.communicate(input)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if interrupted:
+        raise Interrupted(interrupted[0])
+    if check and child.returncode:
+        raise Error(f"{shlex.join(args)} failed ({child.returncode})" + (f": {err.strip()}" if err else ""))
+    return subprocess.CompletedProcess(args, child.returncode, out, err)
+
+
+def output(*args):
+    return run(*args, capture=True).stdout.strip()
+
+
+def ostree_api():
+    import gi
+    gi.require_version("OSTree", "1.0")
+    from gi.repository import Gio, OSTree
+    return Gio, OSTree
+
+
+def repo_path(repo):
+    # Libostree may return a /proc/self/fd path that child processes cannot use.
+    return str(Path(repo.get_path().get_path()).resolve(strict=True))
+
+
+def part_node(device, number):
+    return f"{device}{'p' if device[-1].isdigit() else ''}{number}"
+
+
+@dataclass(frozen=True)
+class Partition:
+    number: int
+    start: int
+    end: int
+    name: str
+    type: str
+    uuid: str = ""
+    attrs: str = ""
+
+
+@dataclass(frozen=True)
+class Table:
+    device: str
+    sector_size: int
+    first: int
+    last: int
+    disk_id: str
+    parts: tuple
+    entry_count: int = 128
+    unused: tuple = ()
+
+    @classmethod
+    def parse(cls, device, data):
+        try:
+            t = data["partitiontable"]
+            sector = t["sectorsize"]
+            if (t["label"] != "gpt" or t["unit"] != "sectors" or t["device"] != device
+                    or type(sector) is not int or sector not in (512, 4096)):
+                raise ValueError("expected a GPT disk with 512 or 4096 byte sectors")
+            first, last = t["firstlba"], t["lastlba"]
+            if type(first) is not int or type(last) is not int or not 0 < first < last:
+                raise ValueError("invalid usable disk bounds")
+            count = t.get("table-length", 128)
+            if not re.fullmatch(r"[1-9][0-9]*", str(count)) or int(count) > 2**32 - 1:
+                raise ValueError("invalid GPT entry count")
+            count = int(count)
+            parts, unused = [], []
+            for p in t["partitions"]:
+                node = p["node"]
+                match = re.fullmatch(re.escape(device) + ("p" if device[-1].isdigit() else "") + r"([1-9][0-9]*)", node)
+                if not match or int(match[1]) > count:
+                    raise ValueError("invalid partition number")
+                if p["type"] == "00000000-0000-0000-0000-000000000000":
+                    unused.append(int(match[1]))
+                    continue
+                if type(p["start"]) is not int or type(p["size"]) is not int or p["size"] <= 0:
+                    raise ValueError("invalid partition extent or device node")
+                if not isinstance(p.get("name", ""), str):
+                    raise ValueError("invalid partition name")
+                parts.append(Partition(int(match[1]), p["start"], p["start"] + p["size"],
+                                       p.get("name", ""), p["type"].lower(), p["uuid"].lower(), p.get("attrs", "")))
+            ordered = sorted(parts, key=lambda p: p.start)
+            if (len({p.number for p in parts} | set(unused)) != len(parts) + len(unused)
+                    or any(p.start < first or p.end > last + 1 for p in parts)
+                    or any(a.end > b.start for a, b in zip(ordered, ordered[1:]))):
+                raise ValueError("overlapping or out-of-bounds partitions")
+            return cls(device, sector, first, last, t["id"].lower(), tuple(sorted(parts, key=lambda p: p.number)), count, tuple(sorted(unused)))
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise Error(f"Could not validate the partition table: {error}") from error
+
+    def layout(self):
+        userdata = [p for p in self.parts if p.name == "userdata"]
+        if len(userdata) != 1:
+            raise Error("Expected exactly one Android userdata partition")
+        userdata = userdata[0]
+        tail = tuple(sorted((p for p in self.parts if p.start >= userdata.end), key=lambda p: p.start))
+        return userdata, tail
+
+    def info(self):
+        userdata, tail = self.layout()
+        android_gib = (userdata.end - userdata.start) * self.sector_size // GIB
+        if tail:
+            return dict(mode="occupied", partition_names=", ".join(
+                            f"{part_node(self.device, p.number)} ({p.name or 'unnamed'})" for p in tail),
+                        android_gib=android_gib, linux_gib=sum(p.end - p.start for p in tail) * self.sector_size // GIB)
+        maximum = ((userdata.end * self.sector_size // MIB * MIB)
+                   - align_up(userdata.start * self.sector_size) - RESERVE) // GIB
+        if maximum < ANDROID_MIN // GIB:
+            return dict(mode="toosmall", needed_gib=RESERVE // GIB, android_current_gib=android_gib)
+        return dict(mode="fresh", android_min_gib=ANDROID_MIN // GIB, android_max_gib=maximum,
+                    android_current_gib=android_gib)
+
+
+def align_up(value):
+    return (value + MIB - 1) // MIB * MIB
+
+
+def read_table(device):
+    try:
+        return Table.parse(device, json.loads(output("sfdisk", "--json", device)))
+    except ValueError as error:
+        raise Error(f"Invalid partition table output: {error}") from error
+
+
+def table_fingerprint(table):
+    ident = os.stat(table.device).st_rdev
+    diskseq = (Path("/sys/dev/block") / f"{os.major(ident)}:{os.minor(ident)}" / "diskseq").read_text().strip()
+    data = dict(table=asdict(table), device_id=ident, disk_sequence=diskseq)
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class Plan:
+    table: Table
+    operation: str
+    userdata: Partition
+    userdata_end: int
+    remove: tuple
+    create: tuple
+
+    @classmethod
+    def make(cls, table, userdata_gib=None):
+        userdata, tail = table.layout()
+        sector = table.sector_size
+        end = max(p.end for p in (userdata, *tail))
+        if tail:
+            if userdata_gib is not None:
+                raise Error("--userdata-gib only applies to a fresh install")
+            operation, ud_end = "replace", userdata.end
+            start = align_up(ud_end * sector) // sector
+        else:
+            info = table.info()
+            if info["mode"] == "toosmall":
+                raise Error("Not enough space for Android and Armada")
+            if type(userdata_gib) is not int or not info["android_min_gib"] <= userdata_gib <= info["android_max_gib"]:
+                raise Error(f"Android size must be {info['android_min_gib']}..{info['android_max_gib']} GiB")
+            operation = "fresh"
+            ud_end = (align_up(userdata.start * sector) + userdata_gib * GIB) // sector
+            start = ud_end
+        end = end * sector // MIB * MIB // sector
+        if (end - start) * sector < ESP_SIZE + BOOT_SIZE + ROOT_MIN:
+            raise Error("Space after userdata is too small; use UNINSTALL CFW in ABL, then install with a smaller Android size")
+        used = {p.number for p in table.parts if p not in tail}
+        preferred = [userdata.number + offset for offset in (1, 2, 3)]
+        free = [number for number in range(1, table.entry_count + 1) if number not in used]
+        numbers = preferred if all(number in free for number in preferred) else free[:3]
+        if len(numbers) != 3:
+            raise Error("Not enough free GPT partition slots")
+        esp_end, boot_end = start + ESP_SIZE // sector, start + (ESP_SIZE + BOOT_SIZE) // sector
+        create = (Partition(numbers[0], start, esp_end, "ARMADA", ESP_TYPE),
+                  Partition(numbers[1], esp_end, boot_end, "ARMADA_BOOT", LINUX_TYPE),
+                  Partition(numbers[2], boot_end, end, "ARMADA_ROOT", LINUX_TYPE))
+        return cls(table, operation, userdata, ud_end, tail, create)
+
+    def describe(self):
+        if self.operation == "replace":
+            names = ", ".join(f"{part_node(self.table.device, p.number)} ({p.name or 'unnamed'})" for p in self.remove)
+            return f"Erase ALL partitions after Android userdata on {self.table.device} ({names}) and install the running Armada image? All data in these partitions will be lost. Userdata and earlier partitions stay unchanged."
+        size = (self.userdata_end - self.userdata.start) * self.table.sector_size // GIB
+        return f"Install the running Armada image and resize Android to {size} GiB? All Android user data will be erased."
+
+    def script(self):
+        table = self.table
+        lines = ["label: gpt", f"label-id: {table.disk_id}", "unit: sectors",
+                 f"first-lba: {table.first}", f"last-lba: {table.last}",
+                 f"sector-size: {table.sector_size}", f"table-length: {table.entry_count}"]
+        parts = [replace(p, end=self.userdata_end) if p == self.userdata else p
+                 for p in table.parts if p not in self.remove] + list(self.create)
+        for p in sorted(parts, key=lambda p: p.number):
+            name = re.sub(r'["\\\x00-\x1f]', lambda m: f"\\x{ord(m[0]):02x}", p.name)
+            fields = [f"start={p.start}", f"size={p.end - p.start}", f"type={p.type}",
+                      f'name="{name}"']
+            if p.uuid:
+                fields.append("uuid=" + p.uuid)
+            if p.attrs:
+                fields.append("attrs=" + json.dumps(p.attrs))
+            lines.append(part_node(table.device, p.number) + ": " + ", ".join(fields))
+        return "\n".join(lines) + "\n"
+
+    def write(self):
+        run("sfdisk", "--no-reread", "--no-tell-kernel", "--wipe=never", "--wipe-partitions=never",
+            self.table.device, input=self.script())
+
+    def verify(self, actual):
+        expected = {p.number: p for p in self.table.parts if p not in self.remove}
+        expected[self.userdata.number] = replace(self.userdata, end=self.userdata_end)
+        new = {p.number: p for p in self.create}
+        if ((actual.device, actual.sector_size, actual.first, actual.last, actual.disk_id, actual.entry_count)
+                != (self.table.device, self.table.sector_size, self.table.first, self.table.last, self.table.disk_id, self.table.entry_count)
+                or actual.unused or {p.number for p in actual.parts} != expected.keys() | new.keys()):
+            raise Error("Partition table does not match the installation plan")
+        for p in actual.parts:
+            wanted = new.get(p.number)
+            if (wanted and replace(p, uuid="", attrs="") != wanted) or (not wanted and p != expected[p.number]):
+                raise Error(f"Partition {p.number} does not match the installation plan")
+
+
+    def verify_kernel(self):
+        for p in (replace(self.userdata, end=self.userdata_end), *self.create):
+            node = part_node(self.table.device, p.number)
+            path = Path("/sys/class/block") / Path(self.table.device).name / Path(node).name
+            try:
+                ident = os.stat(node).st_rdev
+                device_id = (path / "dev").read_text().strip()
+                # Sysfs uses 512-byte sectors even on 4Kn disks.
+                start = int((path / "start").read_text()) * 512
+                size = int((path / "size").read_text()) * 512
+            except (OSError, ValueError) as error:
+                raise Error(f"Could not verify the kernel partition mapping for {node}: {error}") from error
+            if (device_id != f"{os.major(ident)}:{os.minor(ident)}"
+                    or start != p.start * self.table.sector_size
+                    or size != (p.end - p.start) * self.table.sector_size):
+                raise Error(f"Kernel partition mapping for {node} does not match the installation plan")
+
+
+def discover_device(override=None):
+    if override:
+        device = str(Path(override).resolve(strict=True))
+    else:
+        disks = json.loads(output("lsblk", "--json", "--paths", "--output", "NAME,TYPE,PARTLABEL"))["blockdevices"]
+        candidates = [d["name"] for d in disks if d["type"] == "disk"
+                      and any(p.get("partlabel") == "userdata" for p in d.get("children", []))]
+        if len(candidates) != 1:
+            raise Error("Could not uniquely identify internal storage; use --device or ARMADA_INTERNAL_DEVICE")
+        device = candidates[0]
+    if not Path(device).is_block_device() or output("lsblk", "-dnro", "TYPE", device) != "disk":
+        raise Error(f"{device} is not a whole block device")
+    return device
+
+
+def refuse_boot_disk(device):
+    mount = "/sysroot" if Path("/sysroot").is_mount() else "/"
+    source = output("findmnt", "--noheadings", "--output", "SOURCE", "--target", mount).split("[", 1)[0]
+    if not Path(source).is_block_device():
+        raise Error("Cannot determine the boot disk; refusing to modify internal storage")
+    ancestors = output("lsblk", "--inverse", "--noheadings", "--raw", "--output", "MAJ:MIN", source).splitlines()
+    ident = os.stat(device).st_rdev
+    if not ancestors or f"{os.major(ident)}:{os.minor(ident)}" in ancestors:
+        raise Error("Refusing to modify the disk the running system booted from")
+
+
+def require_idle(plan):
+    parts = list(plan.remove)
+    if plan.operation != "replace":
+        parts.append(plan.userdata)
+    mounted = {line.split()[2] for path in ("/proc/1/mountinfo", "/proc/self/mountinfo")
+               for line in Path(path).read_text().splitlines()}
+    swaps = {os.stat(line.split()[0]).st_rdev for line in Path("/proc/swaps").read_text().splitlines()[1:]}
+    for p in parts:
+        node = part_node(plan.table.device, p.number)
+        ident = os.stat(node).st_rdev
+        key = f"{os.major(ident)}:{os.minor(ident)}"
+        if key in mounted or ident in swaps or any((Path("/sys/dev/block") / key / "holders").iterdir()):
+            raise Error(f"{node} is in use; unmount it and disable its swap or device mappings before continuing")
+
+
+@dataclass
+class SourceImage:
+    repo: object
+    checksum: str
+    origin: object
+    refs: dict
+
+    @classmethod
+    def read(cls, repo, deployment):
+        _, OSTree = ostree_api()
+        from gi.repository import GLib
+        if deployment is None or deployment.get_unlocked() != OSTree.DeploymentUnlockedState.NONE:
+            raise Error("A locked, booted OSTree deployment is required")
+        origin = deployment.get_origin()
+        if origin is None or any(origin.has_group(g) for g in ("rpmostree", "packages", "overrides", "modules")):
+            raise Error("Missing update origin or unsupported local package modifications")
+        data, length = origin.to_data()
+        origin = type(origin).new()
+        origin.load_from_data(data, length, 0)
+        ref = origin.get_string("origin", "container-image-reference")
+        if not re.fullmatch(r"(?:ostree-image-signed:docker://|ostree-unverified-registry:|ostree-unverified-image:)[A-Za-z0-9_./:@+-]+", ref):
+            raise Error("Unsupported container update origin")
+        registry_ref = re.sub(r"^(?:ostree-image-signed:docker://|ostree-unverified-registry:(?:docker://)?|ostree-unverified-image:docker://)", "", ref)
+        if re.fullmatch(r"ghcr\.io/(?:armada-os|virtudude)/armada(?::[A-Za-z0-9_.-]+)?(?:@sha256:[0-9a-f]{64})?", registry_ref):
+            origin.set_string("origin", "container-image-reference", "ostree-image-signed:docker://" + registry_ref)
+        checksum = deployment.get_csum()
+        try:
+            metadata = cls.metadata(repo, checksum)
+            manifest = json.loads(metadata["ostree.manifest"])
+            config = json.loads(metadata["ostree.container.image-config"])
+            if (not isinstance(config, dict) or not re.fullmatch(r"sha256:[0-9a-f]{64}", metadata["ostree.manifest-digest"])
+                    or manifest["schemaVersion"] != 2 or not isinstance(manifest["layers"], list) or not manifest["layers"]):
+                raise ValueError("invalid image metadata")
+            refs = {checksum: checksum}
+            for layer in manifest["layers"]:
+                digest = layer["digest"]
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                    raise ValueError("invalid layer digest")
+                layer_ref = "ostree/container/blob/" + digest.replace(":", "_3A_")
+                _, layer_commit = repo.resolve_rev(layer_ref, False)
+                cls.metadata(repo, layer_commit)
+                refs[layer_ref] = layer_commit
+        except (KeyError, TypeError, ValueError, GLib.Error) as error:
+            raise Error(f"The selected deployment has no supported complete container image: {error}") from error
+        return cls(repo, checksum, origin, refs)
+
+    @staticmethod
+    def metadata(repo, checksum):
+        _, commit, state = repo.load_commit(checksum)
+        if state:
+            raise Error(f"Incomplete source commit: {checksum}")
+        return commit.unpack()[0]
+
+    def copy(self, target):
+        repo = Path(target) / "ostree/repo"
+        run("ostree", "pull-local", "--untrusted", "--disable-verify-bindings", f"--repo={repo}",
+            repo_path(self.repo), *self.refs)
+        for ref, expected in self.refs.items():
+            if output("ostree", "rev-parse", f"--repo={repo}", ref) != expected:
+                raise Error(f"Copied image reference does not match the source: {ref}")
+        run("ostree", "fsck", f"--repo={repo}")
+
+
+@contextmanager
+def locked_source():
+    _, OSTree = ostree_api()
+    sysroot = OSTree.Sysroot.new_default()
+    sysroot.initialize_with_mount_namespace(None)
+    if not sysroot.is_booted():
+        raise Error("The installer must run from a booted OSTree system")
+    run("mount", "--make-rprivate", "/")
+    print("Waiting for the OSTree source lock...", flush=True)
+    sysroot.lock()
+    try:
+        sysroot.load(None)
+        _, repo = sysroot.get_repo(None)
+        path = repo_path(repo)
+        # fsck can mark damaged commits partial, even without repair options.
+        run("mount", "--bind", path, path)
+        try:
+            run("mount", "-o", "remount,bind,ro", path)
+            yield SourceImage.read(repo, sysroot.get_booted_deployment())
+        finally:
+            run("umount", path)
+    finally:
+        sysroot.unlock()
+
+
+def base_kargs(directory=Path("/usr/lib/bootc/kargs.d")):
+    args = []
+    for path in sorted(directory.glob("*.toml")):
+        with path.open("rb") as stream:
+            data = tomllib.load(stream)
+        if "match-architectures" in data and platform.machine() not in data["match-architectures"]:
+            continue
+        values = data.get("kargs", [])
+        if not isinstance(values, list) or any(not isinstance(v, str) or any(c.isspace() for c in v) for v in values):
+            raise Error(f"Invalid kernel arguments in {path}")
+        args.extend(v for v in values if not v.startswith(("root=", "boot=", "rootflags=", "ostree=")))
+    return args
+
+
+def configure_deployment(target, source, uuids, kargs):
+    Gio, OSTree = ostree_api()
+    sysroot = OSTree.Sysroot.new(Gio.File.new_for_path(str(target)))
+    sysroot.load(None)
+    deployments = sysroot.get_deployments()
+    if len(deployments) != 1 or deployments[0].get_csum() != source.checksum:
+        raise Error("Target does not contain exactly the selected deployment")
+    deployment = deployments[0]
+    if deployment.get_origin().get_string("origin", "container-image-reference") != source.origin.get_string("origin", "container-image-reference"):
+        raise Error("Target update origin does not match the selected image")
+    root = target / "ostree/deploy" / deployment.get_osname() / "deploy" / f"{source.checksum}.{deployment.get_deployserial()}"
+    (root / "etc/fstab").write_text(
+        f"UUID={uuids['boot']} /boot auto ro 0 0\n"
+        f"UUID={uuids['esp']} /boot/efi vfat umask=0077,shortname=winnt 0 2\n"
+        f"UUID={uuids['root']} /var btrfs {BTRFS_OPTS},subvol=var 0 0\n"
+        f"UUID={uuids['root']} /var/home btrfs {BTRFS_OPTS},subvol=home 0 0\n")
+    entries = list((target / "boot/loader/entries").glob("*.conf"))
+    if len(entries) != 1:
+        raise Error("Expected one boot entry for the new installation")
+    entry = entries[0]
+    fields = dict(line.split(None, 1) for line in entry.read_text().splitlines() if line.strip())
+    pointers = [arg for arg in fields.get("options", "").split() if arg.startswith("ostree=")]
+    if len(pointers) != 1 or not fields.get("linux") or not fields.get("initrd"):
+        raise Error("Incomplete boot entry")
+    if (target / pointers[0].split("=", 1)[1].lstrip("/")).resolve(strict=True) != root.resolve():
+        raise Error("Boot entry does not reference the selected deployment")
+    linux, initrd = (fields[key] if fields[key].startswith("/boot/") else "/boot" + fields[key] for key in ("linux", "initrd"))
+    options = [f"root=UUID={uuids['root']}", "rw", f"boot=UUID={uuids['boot']}", *kargs,
+               f"rootflags=subvol=root,{BTRFS_OPTS}", pointers[0]]
+    entry.write_text(f"title Armada\nversion {fields.get('version', '1')}\noptions {' '.join(options)}\n"
+                     f"linux {linux}\ninitrd {initrd}\nfdtdir {Path(linux).parent}/dtb\n")
+
+
+class Installation:
+    def __init__(self, plan):
+        self.plan = plan
+        self.changed = False
+        self.mounts = []
+        self.work = None
+
+    def mount(self, source, target, options=None):
+        target.mkdir(parents=True, exist_ok=True)
+        self.mounts.append(target)
+        try:
+            run("mount", *(["-o", options] if options else []), source, target)
+        except BaseException:
+            if not target.is_mount():
+                self.mounts.remove(target)
+            raise
+
+    def close(self):
+        failed = False
+        for target in reversed(self.mounts):
+            try:
+                run("umount", target)
+            except (Error, OSError) as error:
+                failed = True
+                print(f"ERROR: cleanup: {error}", file=sys.stderr)
+        if self.work and not failed:
+            shutil.rmtree(self.work)
+        if failed:
+            raise Error("Could not unmount the installation filesystems; do not remove storage")
+
+    def partition(self):
+        plan = self.plan
+        refuse_boot_disk(plan.table.device)
+        if read_table(plan.table.device) != plan.table:
+            raise Error("The partition table changed after inspection; start the installer again")
+        require_idle(plan)
+        self.changed = True
+        plan.write()
+        run("partprobe", plan.table.device)
+        run("udevadm", "settle")
+        plan.verify(read_table(plan.table.device))
+        plan.verify_kernel()
+        if plan.operation != "replace":
+            run("dd", "if=/dev/zero", f"of={part_node(plan.table.device, plan.userdata.number)}",
+                "bs=1M", "count=8", "conv=fsync", "status=none")
+
+    def deploy(self, source, kargs):
+        plan = self.plan
+        esp, boot, root = [part_node(plan.table.device, p.number) for p in plan.create]
+        self.work = Path(tempfile.mkdtemp(prefix="armada-install.", dir="/run"))
+        target, top = self.work / "target", self.work / "top"
+        print("Preparing the internal filesystems...", flush=True)
+        run("mkfs.btrfs", "-f", "-L", "root", root)
+        self.mount(root, top)
+        for name in ("root", "var", "home"):
+            run("btrfs", "subvolume", "create", top / name)
+        run("umount", top)
+        self.mounts.remove(top)
+        self.mount(root, target, BTRFS_OPTS + ",subvol=root")
+        self.mount(root, target / "var", BTRFS_OPTS + ",subvol=var")
+        self.mount(root, target / "var/home", BTRFS_OPTS + ",subvol=home")
+        run("ostree", "admin", "init-fs", "--modern", target)
+        run("mkfs.vfat", "-F", "16", "-S", plan.table.sector_size, "-s", 16384 // plan.table.sector_size, "-n", "ARMADA", esp)
+        run("mkfs.ext4", "-F", "-L", "boot", boot)
+        self.mount(boot, target / "boot")
+        self.mount(esp, target / "boot/efi")
+        uuids = {name: output("blkid", "-s", "UUID", "-o", "value", node)
+                 for name, node in (("root", root), ("boot", boot), ("esp", esp))}
+        if not all(re.fullmatch(r"[A-Za-z0-9-]+", value) for value in uuids.values()):
+            raise Error("Could not determine filesystem UUIDs")
+        repo = target / "ostree/repo"
+        run("ostree", "config", f"--repo={repo}", "set", "sysroot.bootloader", "none")
+        run("ostree", "config", f"--repo={repo}", "set", "sysroot.bootprefix", "true")
+        run("ostree", "config", f"--repo={repo}", "set", "sysroot.readonly", "true")
+        run("ostree", "admin", "os-init", f"--sysroot={target}", "default")
+        print("Copying and verifying the selected image...", flush=True)
+        source.copy(target)
+        origin = self.work / "origin"
+        origin.write_text(source.origin.to_data()[0])
+        run("ostree", "admin", "deploy", "--no-merge", f"--origin-file={origin}", f"--sysroot={target}", "--os=default", source.checksum)
+        seed = target / ".armada-var-seed"
+        run("ostree", "checkout", f"--repo={repo}", "--subpath=/var", source.checksum, seed)
+        run("cp", "-a", f"{seed}/.", f"{target}/var/")
+        shutil.rmtree(seed)
+        configure_deployment(target, source, uuids, kargs)
+        print("Writing the internal boot image...", flush=True)
+        with tempfile.TemporaryDirectory(prefix=".armada-bootimg.", dir=target) as scratch:
+            run(BOOTIMG, env=dict(os.environ, TMPDIR=scratch, ESP=str(target / "boot/efi"),
+                                 BOOTROOT=str(target / "boot"), SYSROOT=str(target)))
+        if not (target / "boot/efi/KERNEL").is_file() or not (target / "boot/efi/KERNEL").stat().st_size:
+            raise Error("The internal boot image was not created")
+
+    def recovery(self):
+        android = " Android userdata and earlier partitions are unchanged." if self.plan.operation == "replace" else ""
+        return "Internal storage was modified." + android + " Do not boot internal storage. " + RECOVERY
+
+
+@contextmanager
+def operation(plan):
+    job = Installation(plan)
+    failure = None
+    try:
+        yield job
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        try:
+            job.close()
+        except (Error, OSError) as error:
+            if failure is None:
+                failure = error
+                raise
+        finally:
+            if failure is not None and job.changed:
+                print("ERROR: " + job.recovery(), file=sys.stderr)
+
+
+@contextmanager
+def inhibit_sleep():
+    # Starting systemd-inhibit does not mean logind has granted the lock.
+    child = subprocess.Popen(["systemd-inhibit", "--what=sleep:idle:shutdown", "--who=Armada Installer",
+                              "--why=installer operation in progress", "--mode=block", sys.executable, "-c",
+                              "import time; print('ready', flush=True); time.sleep(2147483647)"],
+                             stdout=subprocess.PIPE, start_new_session=True)
+    try:
+        if not select.select([child.stdout], [], [], 10)[0] or child.stdout.readline() != b"ready\n":
+            raise Error("Could not inhibit sleep and shutdown; installation was not started")
+        yield
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGTERM)
+        child.wait()
+        child.stdout.close()
+
+
+def require_commands():
+    needed = ["sfdisk", "lsblk", "findmnt", "partprobe", "udevadm", "dd", "systemd-inhibit", "mount"]
+    needed += ["btrfs", "mkfs.btrfs", "mkfs.ext4", "mkfs.vfat", "umount", "ostree", "blkid", "cp", BOOTIMG]
+    missing = [name for name in needed if not shutil.which(name)]
+    if missing:
+        raise Error("Missing required tools: " + ", ".join(missing))
+
+
+def execute(args):
+    if os.geteuid() != 0:
+        raise Error("This command must run as root")
+    if args.command == "preflight":
+        started = time.monotonic()
+        with inhibit_sleep(), locked_source() as source:
+            print("Checking the complete source repository...", flush=True)
+            run("ostree", "fsck", f"--repo={repo_path(source.repo)}")
+            print(f"Validated source commit: {source.checksum}", flush=True)
+        print(f"Source preflight completed in {time.monotonic() - started:.1f} seconds; internal storage was not touched.", flush=True)
+        return
+    device = discover_device(args.device)
+    table = read_table(device)
+    if args.command == "detect":
+        info = table.info()
+        info.update(device=device, table_fingerprint=table_fingerprint(table))
+        print(json.dumps(info) if args.json else "\n".join(f"{k}={v}" for k, v in info.items()))
+        return
+    if args.expect_table is not None and args.expect_table != table_fingerprint(table):
+        raise Error("The target device or partition table changed after confirmation; start the installer again")
+    require_commands()
+    refuse_boot_disk(device)
+    with open("/run/armada-installer.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Error("Another installation is already running") from error
+        size = getattr(args, "userdata_gib", None)
+        if args.command == "install" and table.info()["mode"] == "fresh" and size is None:
+            if args.assume_yes:
+                raise Error("Specify --userdata-gib for an unattended fresh install")
+            info = table.info()
+            try:
+                size = int(input(f"New Android size in GiB ({info['android_min_gib']}..{info['android_max_gib']}): "))
+            except ValueError as error:
+                raise Error("Android size must be an integer") from error
+        plan = Plan.make(table, size)
+        print(plan.describe(), flush=True)
+        if not args.assume_yes and input("Proceed? [y/N]: ").strip().lower() not in ("y", "yes"):
+            raise Cancelled()
+        require_idle(plan)
+        with inhibit_sleep():
+            kargs = base_kargs()
+            with locked_source() as source:
+                with operation(plan) as job:
+                    job.partition()
+                    job.deploy(source, kargs)
+                    os.sync()
+        print("Install complete. Power off, remove the SD card, then power on.", flush=True)
+
+
+
+def choose_android_size(minimum, maximum, total):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, Gtk
+
+    selected = []
+    app = Adw.Application(application_id="org.armada.Installer.Size", flags=Gio.ApplicationFlags.NON_UNIQUE)
+
+    def activate(application):
+        window = Adw.MessageDialog(application=application, title="Armada Installer", heading="Armada Installer")
+        window.set_default_size(480, -1)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.append(Gtk.Label(label="Choose how to split internal storage", wrap=True))
+        sizes = Gtk.Label()
+        box.append(sizes)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        minus, plus = Gtk.Button(), Gtk.Button()
+        slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, minimum, max(maximum, minimum+1), 1)
+        slider.set_draw_value(False)
+        slider.set_digits(0)
+        slider.set_round_digits(0)
+        slider.set_hexpand(True)
+        slider.set_value(min(maximum, 32))
+        slider.set_sensitive(maximum > minimum)
+        for button, icon, tooltip in ((minus, "list-remove-symbolic", "Decrease Android storage by 1 GiB"),
+                                      (plus, "list-add-symbolic", "Increase Android storage by 1 GiB")):
+            button.set_child(Gtk.Image(icon_name=icon, pixel_size=16))
+            button.set_size_request(56, 56)
+            button.set_tooltip_text(tooltip)
+            button.update_property([Gtk.AccessibleProperty.LABEL], [tooltip])
+        for widget in (minus, slider, plus):
+            row.append(widget)
+        box.append(row)
+
+        def changed(*_):
+            value = max(minimum, min(maximum, round(slider.get_value())))
+            sizes.set_text(f"Android: {value} GiB     Armada: {total-value} GiB")
+            minus.set_sensitive(value > minimum)
+            plus.set_sensitive(value < maximum)
+
+        slider.connect("value-changed", changed)
+        minus.connect("clicked", lambda _: slider.set_value(max(minimum, round(slider.get_value())-1)))
+        plus.connect("clicked", lambda _: slider.set_value(min(maximum, round(slider.get_value())+1)))
+        changed()
+        window.set_extra_child(box)
+        window.add_response("cancel", "Cancel")
+        window.add_response("continue", "Continue")
+        window.set_default_response("continue")
+        window.set_close_response("cancel")
+
+        def respond(dialog, response):
+            if response == "continue":
+                selected.append(max(minimum, min(maximum, round(slider.get_value()))))
+            dialog.destroy()
+
+        window.connect("response", respond)
+        window.present()
+
+    app.connect("activate", activate)
+    app.run([])
+    if not selected:
+        raise Cancelled()
+    return selected[0]
+
+
+class Gui:
+    def __init__(self, device):
+        self.command = ["sudo", SELF, *(["--device", device] if device else [])]
+
+    def dialog(self, kind, text, *options):
+        return run("zenity", "--" + kind, "--title=Armada Installer", "--width=480", "--text=" + html.escape(text),
+                   *options, capture=True, check=False)
+
+    def confirm(self, text, label):
+        if self.dialog("question", text, "--ok-label=" + label, "--cancel-label=Cancel").returncode:
+            raise Cancelled()
+
+    def progress(self, command):
+        fd, name = tempfile.mkstemp(prefix="armada-installer.", suffix=".log",
+                                    dir="/run" if os.geteuid() == 0 else f"/run/user/{os.getuid()}")
+        with os.fdopen(fd, "w") as stream:
+            progress = subprocess.Popen(["zenity", "--progress", "--pulsate", "--auto-close", "--no-cancel",
+                                         "--title=Armada Installer", "--text=Working, do not power off…"], stdin=subprocess.PIPE, text=True)
+            try:
+                progress.stdin.write("0\n")
+                progress.stdin.flush()
+                result = run(*self.command, *command, "--assume-yes", stdout=stream, stderr=subprocess.STDOUT, check=False)
+            finally:
+                try:
+                    progress.stdin.close()
+                except BrokenPipeError:
+                    pass
+                progress.wait()
+        if result.returncode:
+            with open(name, "rb") as log:
+                log.seek(max(0, os.fstat(log.fileno()).st_size - 4096))
+                recent = "\n".join(log.read().decode(errors="replace").splitlines()[-12:])
+            raise Error(f"Operation failed.\n\n{recent}\n\nFull log (available until reboot): {name}\n\n"
+                        "If internal storage was modified: " + RECOVERY)
+
+    def start(self):
+        info = json.loads(output(*self.command, "detect", "--json"))
+        self.command = ["sudo", SELF, "--device", info["device"]]
+        mode = info["mode"]
+        if mode == "toosmall":
+            raise Error(f"Internal storage is too small. Armada needs about {info['needed_gib']} GiB alongside Android.")
+        if mode == "fresh":
+            self.confirm("Install Armada alongside Android?\n\nInstalling Armada will factory-reset Android and erase all Android user data.", "Continue")
+            minimum, maximum = info["android_min_gib"], info["android_max_gib"]
+            gib = choose_android_size(minimum, maximum, info["android_current_gib"])
+            self.confirm(f"Resize Android to {gib} GiB and install Armada? All Android user data will be erased.", "Install")
+            command = ["install", "--userdata-gib", str(gib)]
+        elif mode == "occupied":
+            self.confirm("Replace the existing installation?\n\n"
+                         "Internal storage already has space in use alongside Android. Installing Armada will replace everything in that space.\n\n"
+                         "All data in that space will be erased. Android and its user data will be kept.\n\n"
+                         f"Partitions to erase: {info['partition_names']}",
+                         "Replace with Armada")
+            command = ["install"]
+        else:
+            raise Error("Unknown internal storage layout")
+        self.progress([*command, "--expect-table", info["table_fingerprint"]])
+        if self.dialog("question", "Operation complete. Power off and remove the SD card before booting internal storage.",
+                       "--ok-label=Power off", "--cancel-label=Close").returncode == 0:
+            run("sudo", "systemctl", "poweroff")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, epilog="To uninstall, select UNINSTALL CFW in ABL.")
+    parser.add_argument("--device", default=os.environ.get("ARMADA_INTERNAL_DEVICE"))
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("gui", help="desktop installer")
+    commands.add_parser("detect", help="inspect internal storage without changing it").add_argument("--json", action="store_true")
+    commands.add_parser("preflight", help="validate the running source without touching internal storage")
+    install = commands.add_parser("install", help="install the running image")
+    install.add_argument("--userdata-gib", type=int)
+    install.add_argument("--expect-table", help="require the target fingerprint returned by detect")
+    install.add_argument("-y", "--assume-yes", action="store_true")
+    args = parser.parse_args(argv)
+
+    def interrupt(signum, _frame):
+        raise Interrupted(signum)
+
+    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, interrupt)
+    try:
+        if args.command == "gui":
+            Gui(args.device).start()
+        else:
+            execute(args)
+        return 0
+    except Cancelled:
+        print("Aborted.")
+        return 0
+    except Exception as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        if args.command == "gui":
+            Gui(args.device).dialog("error", str(error))
+        return 128 + error.signum if isinstance(error, Interrupted) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

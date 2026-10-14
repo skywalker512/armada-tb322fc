@@ -1,0 +1,898 @@
+#!/usr/bin/env bash
+# Covers the performance-settings pipeline: armada_perf semantics (cpulist
+# grammar, explicit-all vs unset, sanitize clamps, state layering), the
+# armada-game-launch FEX path staying byte-identical when perf keys are
+# present, the wrapper's explicit affinity reset, armada-powerd config
+# parsing (old configs without [system] must still parse) and IRQ mask
+# derivation, armada-control's PerfManager lifecycle, and the plugin's
+# power-config render with cpu_governor editable.
+
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Pin the tweaks key published by the plugin for the session consumer.
+grep -Fq 'nextTweaks.global.gamescopeVulkanRealtime = on' \
+    "$ROOT/decky/armada-control/src/tabs/Compatibility.tsx" || {
+    printf 'FAIL: plugin no longer writes global.gamescopeVulkanRealtime\n' >&2
+    exit 1
+}
+
+TWEAKS_FIXTURE="$WORK/game-tweaks.json"
+TWEAKS_DEFAULTS_FIXTURE="$ROOT/system_files/usr/share/armada/game-tweaks.json"
+TWEAKS_HELPER="$ROOT/system_files/usr/libexec/armada/armada-game-tweaks"
+SESSION_FILE="$ROOT/system_files/usr/share/gamescope-session-plus/sessions.d/steam"
+SESSION_REALTIME_BLOCK="$(sed -n '/^_armada_game_tweaks=/,/^unset _armada_game_tweaks/p' "$SESSION_FILE")"
+
+session_realtime_value() {
+    env -u GAMESCOPE_FORCE_VULKAN_REALTIME ARMADA_TWEAKS_CONFIG="$TWEAKS_FIXTURE" \
+        ARMADA_TWEAKS_DEFAULTS_CONFIG="$TWEAKS_DEFAULTS_FIXTURE" \
+        ARMADA_GAME_TWEAKS_HELPER="$TWEAKS_HELPER" \
+        ARMADA_GAME_TWEAKS_LIB="$ROOT/system_files/usr/lib/armada" \
+        bash -c "$SESSION_REALTIME_BLOCK"$'\n''printf "%s" "${GAMESCOPE_FORCE_VULKAN_REALTIME:-}"'
+}
+
+printf '{"global":{"gamescopeVulkanRealtime":true}}\n' > "$TWEAKS_FIXTURE"
+[[ "$(session_realtime_value)" == 1 ]] || {
+    printf 'FAIL: enabled session setting did not export realtime queue request\n' >&2
+    exit 1
+}
+printf '{"global":{"gamescopeVulkanRealtime":false}}\n' > "$TWEAKS_FIXTURE"
+[[ -z "$(session_realtime_value)" ]] || {
+    printf 'FAIL: disabled session setting exported realtime queue request\n' >&2
+    exit 1
+}
+printf '{"global":{}}\n' > "$TWEAKS_FIXTURE"
+[[ "$(session_realtime_value)" == 1 ]] || {
+    printf 'FAIL: absent session setting did not inherit factory realtime policy\n' >&2
+    exit 1
+}
+
+python3 - "$ROOT" "$WORK" <<'PYEOF'
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import selectors
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT, WORK = sys.argv[1], sys.argv[2]
+LIB = os.path.join(ROOT, "system_files/usr/lib/armada")
+LIBEXEC = os.path.join(ROOT, "system_files/usr/libexec/armada")
+TWEAKS_DEFAULTS = os.path.join(ROOT, "system_files/usr/share/armada/game-tweaks.json")
+sys.path.insert(0, LIB)
+
+import armada_perf as ap
+import armada_game_tweaks as gt
+import armada_turnip as at
+
+gt.DEFAULTS_CONFIG = pathlib.Path(TWEAKS_DEFAULTS)
+gt.OVERRIDES_CONFIG = pathlib.Path(WORK) / "missing-game-tweaks.json"
+
+failures = []
+
+
+def check(name, condition):
+    if not condition:
+        failures.append(name)
+        print(f"FAIL: {name}", file=sys.stderr)
+
+
+def load_script(name):
+    spec = importlib.util.spec_from_loader(
+        name.replace("-", "_"),
+        importlib.machinery.SourceFileLoader(
+            name.replace("-", "_"), os.path.join(LIBEXEC, name)),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+ENV = {"ARMADA_BIG_CORES": "3-7", "ARMADA_PRIME_CORES": "7", "ARMADA_LITTLE_CORES": "0-2"}
+ALL = ap.online_cpus()
+
+# --- armada_perf: cpulist grammar -------------------------------------------
+check("parse order preserved", ap.parse_cpulist("7,3-5") == [7, 3, 4, 5])
+check("format roundtrip", ap.format_cpulist([3, 4, 5, 7]) == "3-5,7")
+for bad in ("3,3", "a", "5-3", "1-x"):
+    try:
+        ap.parse_cpulist(bad)
+        check(f"parse rejects {bad!r}", False)
+    except ValueError:
+        pass
+
+# --- armada_perf: explicit-all vs unset -------------------------------------
+check("unset is None", ap.resolve_cores(None, ENV) is None and ap.resolve_cores("", ENV) is None)
+check("all is explicit full set", ap.resolve_cores("all", ENV) == ALL)
+check("empty preset is explicit full set",
+      ap.resolve_cores("little", {"ARMADA_LITTLE_CORES": ""}) == ALL)
+check("preset resolves", ap.resolve_cores("big", ENV) == [3, 4, 5, 6, 7])
+try:
+    ap.resolve_cores(f"{max(ALL) + 1}", ENV)
+    check("unknown cpu rejected", False)
+except ValueError:
+    pass
+
+# --- armada_perf: sanitize + layering ---------------------------------------
+clean = ap.sanitize_perf(
+    {"nice": -99, "gamescopeNice": 99, "scheduler": "lavd",
+     "cores": "bogus list", "wineTopology": False}, ENV)
+check("nice clamped", clean["nice"] == ap.NICE_MIN)
+check("gamescope nice clamped", clean["gamescopeNice"] == ap.GAMESCOPE_NICE_MAX)
+check("bad cores dropped", "cores" not in clean)
+check("wineTopology false kept", clean["wineTopology"] is False)
+check("wineTopology true kept", ap.sanitize_perf({"wineTopology": True})["wineTopology"] is True)
+check("unset keys stay absent", ap.sanitize_perf({}, ENV) == {})
+
+state = {"global": {"gamescopeNice": -5, "gamescopeCores": [3, 4, 5, 6, 7]},
+         "override": {"gamescopeCores": ALL, "pid": 1}}
+eff = ap.effective_state(state)
+check("override all clears restrictive global", eff["gamescopeCores"] == ALL)
+check("global survives where override silent", eff["gamescopeNice"] == -5)
+factory_tweaks = gt.load()
+factory_global = factory_tweaks["global"]
+check("factory declares every displayed default", set(factory_global) == {
+    "cores", "fexProfile", "gamescopeCores", "gamescopeNice",
+    "gamescopeVulkanRealtime", "nice", "scheduler", "thunks", "wineTopology",
+})
+check("factory FEX profile loaded", factory_global["fexProfile"] == "default")
+check("factory core masks are unset",
+      factory_global["cores"] is None and factory_global["gamescopeCores"] is None)
+check("factory game policy loaded",
+      factory_global["nice"] == 0 and factory_global["wineTopology"] is True)
+check("factory gamescope policy loaded",
+      factory_global["gamescopeNice"] == -20 and
+      factory_global["gamescopeVulkanRealtime"] is True)
+check("factory scheduler loaded", factory_global["scheduler"] is None)
+check("factory thunk defaults loaded",
+      set(factory_global["thunks"]) == {"Vulkan", "GL", "drm", "WaylandClient", "asound"} and
+      all(factory_global["thunks"].values()))
+factory_perf = ap.sanitize_perf(factory_tweaks["global"], ENV)
+check("gamescope nice defaults to -20",
+      factory_perf["gamescopeNice"] == -20)
+helper_env = {
+    **os.environ,
+    "ARMADA_GAME_TWEAKS_LIB": LIB,
+    "ARMADA_TWEAKS_DEFAULTS_CONFIG": TWEAKS_DEFAULTS,
+    "ARMADA_TWEAKS_CONFIG": os.path.join(WORK, "game-tweaks.json"),
+}
+helper_dump = json.loads(subprocess.check_output(
+    [os.path.join(LIBEXEC, "armada-game-tweaks"), "dump"],
+    env=helper_env, text=True))
+check("game-tweaks helper uses shared merge", helper_dump == factory_tweaks)
+
+gt.OVERRIDES_CONFIG.write_text(json.dumps({
+    "global": {
+        "fexProfile": "fast",
+        "gamescopeNice": 0,
+        "gamescopeVulkanRealtime": False,
+    },
+}), encoding="utf-8")
+overlaid_global = gt.load()["global"]
+check("user values override factory defaults",
+      overlaid_global["fexProfile"] == "fast" and
+      overlaid_global["gamescopeNice"] == 0 and
+      overlaid_global["gamescopeVulkanRealtime"] is False)
+check("absent user values inherit factory defaults",
+      overlaid_global["scheduler"] is None and
+      overlaid_global["wineTopology"] is True)
+gt.OVERRIDES_CONFIG.unlink()
+
+tweaks = {"global": {"fexProfile": "default", "nice": -3},
+          "games": {"620": {"nice": 0, "cores": "big"},
+                    "999": {"enabled": False, "nice": -9}}}
+merged = gt.merged_settings(tweaks, "620")
+check("per-game overrides global", merged["nice"] == 0 and merged["cores"] == "big")
+check("global key survives merge", merged["fexProfile"] == "default")
+check("enabled:false game skipped", gt.merged_settings(tweaks, "999")["nice"] == -3)
+
+# env is additive per-entry with null tombstones (lib AND wrapper copies)
+env_tweaks = {"global": {"env": {"A": "1", "B": "2"}},
+              "games": {"620": {"env": {"B": "override", "C": "3", "A": None}}}}
+merged_env = gt.merged_settings(env_tweaks, "620")["env"]
+check("env additive: game adds", merged_env.get("C") == "3")
+check("env additive: game overrides entry", merged_env.get("B") == "override")
+check("env tombstone removes global var", "A" not in merged_env)
+check("env global-only view intact", gt.merged_settings(env_tweaks, None)["env"] == {"A": "1", "B": "2"})
+
+# --- armada-game-launch: FEX path unchanged by perf keys --------------------
+os.environ["XDG_CACHE_HOME"] = WORK
+launch = load_script("armada-game-launch")
+with open(os.path.join(LIBEXEC, "armada-game-launch"), "rb") as f:
+    check("wrapper interpreter is PATH-independent", f.readline() == b"#!/usr/bin/python3\n")
+
+appimage = pathlib.Path(WORK) / "test.AppImage"
+appimage.write_bytes(b"\x7fELF" + b"\0" * 4 + b"AI\x02")
+not_appimage = pathlib.Path(WORK) / "not-an-appimage"
+not_appimage.write_bytes(b"#!/bin/sh\n")
+fifo = pathlib.Path(WORK) / "argv-fifo"
+os.mkfifo(fifo)
+check("non-regular argv rejected", not launch.is_appimage(str(fifo)))
+saved_path = os.environ.get("PATH")
+try:
+    os.environ["PATH"] = "/steam/runtime/bin"
+    launch.prepare_appimage_path(["/steam-launch-wrapper", "--", str(appimage)])
+    check("AppImage command chain gets system PATH first",
+          os.environ["PATH"] == "/usr/bin:/usr/local/bin:/bin:/steam/runtime/bin")
+    os.environ["PATH"] = "/steam/runtime/bin"
+    launch.prepare_appimage_path(["/steam-launch-wrapper", "--", str(not_appimage)])
+    check("non-AppImage PATH unchanged", os.environ["PATH"] == "/steam/runtime/bin")
+    os.environ["PATH"] = "/steam/runtime/bin:/bin"
+    launch.prepare_appimage_path([str(appimage)])
+    check("existing PATH preserved as suffix",
+          os.environ["PATH"] == "/usr/bin:/usr/local/bin:/bin:/steam/runtime/bin:/bin")
+finally:
+    if saved_path is None:
+        os.environ.pop("PATH", None)
+    else:
+        os.environ["PATH"] = saved_path
+
+base_fex = os.path.join(WORK, "base-fex.json")
+with open(base_fex, "w") as f:
+    json.dump({"Config": {"TSOEnabled": "1"}, "ThunksDB": {"Vulkan": 1, "GL": 1}}, f)
+launch.BASE_FEX_CONFIG = __import__("pathlib").Path(base_fex)
+profiles = {
+    "default": {"config": {"Multiblock": "0"}},
+    "fast": {"config": {"Multiblock": "1"}},
+}
+
+
+def fex_result(settings):
+    env = {}
+    launch.apply_fex(settings, "620", profiles, env)
+    with open(env["FEX_APP_CONFIG"]) as f:
+        return env["FEX_APP_CONFIG"], json.load(f)
+
+
+config_path, plain = fex_result({"fexProfile": "default"})
+check("config lands in test cache dir", config_path.startswith(WORK + "/armada-fex/"))
+_, with_perf = fex_result({"fexProfile": "default", "cores": "big", "nice": -5,
+                           "scheduler": "lavd",
+                           "env": {"X": "1"}, "wineTopology": False})
+check("FEX config unaffected by perf keys", plain == with_perf)
+check("FEX config content sane", plain["Config"]["Multiblock"] == "0")
+check("missing profile uses safety fallback",
+      launch.resolve_fex_config({}, profiles)["Multiblock"] == "0")
+
+# --- armada-game-launch: Turnip driver selection -----------------------------
+turnip_root = pathlib.Path(WORK) / "turnip"
+good = turnip_root / "devel"
+(good / "aarch64").mkdir(parents=True)
+(good / "aarch64" / at.LIBRARY).write_bytes(b"")
+(good / "icd.aarch64.json").write_text("{}")
+(turnip_root / "no-lib").mkdir()
+(turnip_root / "no-lib" / "icd.aarch64.json").write_text("{}")
+at.SYSTEM_DIR = turnip_root
+vk_keys = ("VK_DRIVER_FILES", "VK_ICD_FILENAMES")
+cache_keys = ("STEAM_COMPAT_SHADER_PATH", "VKD3D_SHADER_CACHE_PATH")
+saved_vk = {key: os.environ.pop(key) for key in vk_keys + cache_keys if key in os.environ}
+saved_home = os.environ["HOME"]
+
+
+def turnip_env(settings, preset=None):
+    for key in vk_keys:
+        os.environ.pop(key, None)
+    os.environ.update(preset or {})
+    launch.apply_turnip(settings)
+    return {key: os.environ.get(key) for key in vk_keys}
+
+
+try:
+    expected = ":".join(str(good / f"icd.{arch}.json") for arch in ("aarch64", "x86_64", "i686"))
+    check("turnip variant sets both loader variables",
+          turnip_env({"turnipDriver": "devel"}) == dict.fromkeys(vk_keys, expected))
+    shader_path = pathlib.Path(WORK) / "shadercache" / "620"
+    os.environ["STEAM_COMPAT_SHADER_PATH"] = str(shader_path)
+    turnip_env({"turnipDriver": "devel"})
+    devel_cache = os.environ.pop("VKD3D_SHADER_CACHE_PATH", "")
+    check("a turnip variant gets its own vkd3d cache directory",
+          pathlib.Path(devel_cache).parent == shader_path and pathlib.Path(devel_cache).is_dir())
+    turnip_env({"turnipDriver": "stable"})
+    check("the stable driver keeps vkd3d's own cache location",
+          "VKD3D_SHADER_CACHE_PATH" not in os.environ)
+    os.environ["VKD3D_SHADER_CACHE_PATH"] = "/custom"
+    turnip_env({"turnipDriver": "devel"})
+    check("an existing vkd3d cache path wins",
+          os.environ.pop("VKD3D_SHADER_CACHE_PATH") == "/custom")
+    os.environ["STEAM_COMPAT_SHADER_PATH"] = "relative/shadercache"
+    turnip_env({"turnipDriver": "devel"})
+    check("a relative shader path gets no vkd3d cache override",
+          "VKD3D_SHADER_CACHE_PATH" not in os.environ)
+    (pathlib.Path(WORK) / "not-a-dir").write_text("")
+    os.environ["STEAM_COMPAT_SHADER_PATH"] = WORK + "/not-a-dir"
+    check("a failed vkd3d cache directory keeps the driver selection",
+          turnip_env({"turnipDriver": "devel"})["VK_DRIVER_FILES"] is not None
+          and "VKD3D_SHADER_CACHE_PATH" not in os.environ)
+    del os.environ["STEAM_COMPAT_SHADER_PATH"]
+    for value in (None, "", "stable", 7):
+        check(f"turnip {value!r} keeps the system driver",
+              turnip_env({"turnipDriver": value}) == dict.fromkeys(vk_keys))
+    for value in ("missing", "no-lib", "../turnip/devel", "default"):
+        check(f"turnip {value!r} falls back to the system driver",
+              turnip_env({"turnipDriver": value}) == dict.fromkeys(vk_keys))
+    for key in vk_keys:
+        result = turnip_env({"turnipDriver": "devel"}, {key: "/custom.json"})
+        check(f"existing {key} wins over the turnip setting",
+              result == {**dict.fromkeys(vk_keys), key: "/custom.json"})
+    home = pathlib.Path(WORK) / "home"
+    user_root = at.user_dir(home)
+    arm64_glibc = (b"\x7fELF\x02\x01\x01".ljust(18, b"\0") + b"\xb7\x00").ljust(64, b"\0") \
+        + b"libc.so.6\0"
+    user_libs = {
+        "Banners.Turnip-1": arm64_glibc,
+        "empty": b"",
+        "android": arm64_glibc.replace(b"libc.so.6", b"libc.so\0\0"),
+        "x86": arm64_glibc.replace(b"\xb7\x00", b"\x3e\x00"),
+        "has space (1)": arm64_glibc,
+        "a:b": arm64_glibc,
+        ".hidden": arm64_glibc,
+    }
+    for folder, content in user_libs.items():
+        (user_root / folder).mkdir(parents=True)
+        (user_root / folder / at.LIBRARY).write_bytes(content)
+    (user_root / "Banners.Turnip-1" / "meta.json").write_text('{"name": "Banners Linux"}')
+    for special in ("fifo-lib", "link-lib", "fifo-meta", "huge-meta", "n" * 101):
+        (user_root / special).mkdir()
+    os.mkfifo(user_root / "fifo-lib" / at.LIBRARY)
+    os.symlink(user_root / "Banners.Turnip-1" / at.LIBRARY, user_root / "link-lib" / at.LIBRARY)
+    for folder in ("fifo-meta", "huge-meta", "n" * 101):
+        (user_root / folder / at.LIBRARY).write_bytes(arm64_glibc)
+    os.mkfifo(user_root / "fifo-meta" / "meta.json")
+    (user_root / "huge-meta" / "meta.json").write_text('{"name": "' + "x" * 70000 + '"}')
+    os.environ["HOME"] = str(home)
+    user_env = turnip_env({"turnipDriver": "user:Banners.Turnip-1"})
+    user_manifest = pathlib.Path(WORK) / "armada-turnip" / "Banners.Turnip-1.json"
+    check("user turnip lists its manifest then the guest defaults",
+          user_env == dict.fromkeys(vk_keys, ":".join(
+              [str(user_manifest), *launch.GUEST_TURNIP_MANIFESTS])))
+    with open(user_manifest) as f:
+        check("user turnip manifest points at the user library",
+              json.load(f)["ICD"]["library_path"]
+              == str(user_root / "Banners.Turnip-1" / at.LIBRARY))
+    for value in ("user:empty", "user:android", "user:x86", "user:a:b", "user:.hidden", "user:missing",
+                  "user:fifo-lib", "user:link-lib", "user:" + "n" * 101,
+                  "user:../turnip/Banners.Turnip-1", "user:"):
+        check(f"turnip {value!r} falls back to the system driver",
+              turnip_env({"turnipDriver": value}) == dict.fromkeys(vk_keys))
+    os.environ["STEAM_COMPAT_SHADER_PATH"] = str(shader_path)
+    vkd3d_dirs = set()
+    for folder in ("has space (1)", "Banners.Turnip-1"):
+        turnip_env({"turnipDriver": "user:" + folder})
+        vkd3d_dirs.add(os.environ.pop("VKD3D_SHADER_CACHE_PATH", None))
+    check("distinct user drivers get distinct vkd3d caches",
+          len(vkd3d_dirs) == 2 and devel_cache not in vkd3d_dirs)
+    del os.environ["STEAM_COMPAT_SHADER_PATH"]
+    for key in vk_keys:
+        os.environ.pop(key, None)
+    launch.apply_perf({"env": {"VK_DRIVER_FILES": "/from-settings.json"}}, None)
+    launch.apply_turnip({"turnipDriver": "devel"})
+    check("a driver override in the env settings wins over the turnip setting",
+          os.environ.get("VK_DRIVER_FILES") == "/from-settings.json"
+          and "VK_ICD_FILENAMES" not in os.environ)
+    os.environ["XDG_CACHE_HOME"] = WORK + "/a:b"
+    check("a cache path that would split the manifest list falls back",
+          turnip_env({"turnipDriver": "user:Banners.Turnip-1"}) == dict.fromkeys(vk_keys))
+    os.environ["XDG_CACHE_HOME"] = WORK
+    check("a user driver name does not resolve as a system variant",
+          turnip_env({"turnipDriver": "Banners.Turnip-1"}) == dict.fromkeys(vk_keys))
+    (good / "variant.json").write_text('{"label": "Devel", "version": "26.3.0-devel"}')
+    (turnip_root / "no-lib" / "variant.json").write_text('{"label": "Broken"}')
+    (turnip_root / "stable").mkdir()
+    (turnip_root / "stable" / "variant.json").write_text('{"label": "Stable", "version": "26.2.3"}')
+    listed = at.list_drivers(home)
+    check("the picker lists exactly the drivers the launcher accepts",
+          listed == [{"id": "stable", "label": "Stable", "version": "26.2.3"},
+                     {"id": "devel", "label": "Devel", "version": "26.3.0-devel"},
+                     {"id": "user:Banners.Turnip-1", "label": "Banners Linux", "version": ""},
+                     {"id": "user:fifo-meta", "label": "fifo-meta", "version": ""},
+                     {"id": "user:has space (1)", "label": "has space (1)", "version": ""},
+                     {"id": "user:huge-meta", "label": "huge-meta", "version": ""}]
+          and all(launch.turnip_manifests(driver["id"]) for driver in listed[1:]))
+    (turnip_root / "stable" / "variant.json").unlink()
+    check("stable is listed even without its version file",
+          at.list_drivers(home)[0] == {"id": "stable", "label": "Stable", "version": ""})
+    turnip_tweaks = {"global": {"turnipDriver": "devel"},
+                     "games": {"620": {"turnipDriver": "stable"}, "730": {"nice": 1},
+                               "840": {"enabled": False, "turnipDriver": "stable"}}}
+    check("game stable overrides a global turnip variant",
+          turnip_env(gt.merged_settings(turnip_tweaks, "620")) == dict.fromkeys(vk_keys))
+    check("game without a turnip key inherits global",
+          turnip_env(gt.merged_settings(turnip_tweaks, "730"))["VK_DRIVER_FILES"] == expected)
+    check("disabled game override inherits global",
+          turnip_env(gt.merged_settings(turnip_tweaks, "840"))["VK_DRIVER_FILES"] == expected)
+finally:
+    for key in vk_keys + cache_keys:
+        os.environ.pop(key, None)
+    os.environ.update(saved_vk)
+    os.environ["HOME"] = saved_home
+
+# --- armada-game-launch: explicit affinity reset ----------------------------
+saved = os.sched_getaffinity(0)
+topology_keys = ("WINE_CPU_TOPOLOGY", "PROTON_CPU_TOPOLOGY")
+saved_topology = {key: os.environ[key] for key in topology_keys if key in os.environ}
+try:
+    restricted = set(list(saved)[:2]) if len(saved) > 2 else saved
+    os.sched_setaffinity(0, restricted)
+    for key in topology_keys:
+        os.environ.pop(key, None)
+    launch.apply_perf({}, None)  # session socket warning on stderr is fine
+    check("wrapper resets inherited mask", os.sched_getaffinity(0) == set(ap.online_cpus()))
+    check("no topology without cores", all(key not in os.environ for key in topology_keys))
+    launch.apply_perf({"cores": "7,3-6"}, None)
+    check("ordered topology derived", os.environ.get("WINE_CPU_TOPOLOGY") == "5:7,3,4,5,6")
+    check("Proton override matches Wine topology",
+          os.environ.get("PROTON_CPU_TOPOLOGY") == "5:7,3,4,5,6")
+    check("cores mask applied", os.sched_getaffinity(0) == {3, 4, 5, 6, 7})
+    for key in topology_keys:
+        os.environ.pop(key, None)
+    launch.apply_perf({"cores": "big", "scheduler": "cosmos"}, None)
+    check("cosmos skips hard mask", os.sched_getaffinity(0) == set(ap.online_cpus()))
+    # a malformed env name must not abort the rest of the launch path
+    os.sched_setaffinity(0, restricted)
+    os.environ.pop("GOODVAR", None)
+    launch.apply_perf({"env": {"BAD=NAME": "x", "GOODVAR": "1"}, "cores": "7,3-6"}, None)
+    check("bad env entry contained", os.environ.get("GOODVAR") == "1")
+    check("launch path survives bad env", os.sched_getaffinity(0) == {3, 4, 5, 6, 7})
+    os.environ.pop("GOODVAR", None)
+    for explicit in (
+            {"WINE_CPU_TOPOLOGY": "2:6,7"},
+            {"PROTON_CPU_TOPOLOGY": "2:7,6"},
+            {"WINE_CPU_TOPOLOGY": "1:6", "PROTON_CPU_TOPOLOGY": "1:7"}):
+        for source in ("inherited", "settings"):
+            for key in topology_keys:
+                os.environ.pop(key, None)
+            settings = {"cores": "7,3-6"}
+            if source == "inherited":
+                os.environ.update(explicit)
+            else:
+                settings["env"] = explicit
+            launch.apply_perf(settings, None)
+            expected = explicit.get("PROTON_CPU_TOPOLOGY", explicit.get("WINE_CPU_TOPOLOGY"))
+            check(f"{source} topology overrides preserved: {explicit}",
+                  all(os.environ.get(key) == explicit.get(key, expected) for key in topology_keys))
+    for key in topology_keys:
+        os.environ.pop(key, None)
+    launch.apply_perf({"cores": "6-7", "wineTopology": False}, None)
+    check("disabled topology exports neither variable",
+          all(key not in os.environ for key in topology_keys))
+    check("disabled topology still pins cores", os.sched_getaffinity(0) == {6, 7})
+finally:
+    os.sched_setaffinity(0, saved)
+    for key in topology_keys:
+        os.environ.pop(key, None)
+    os.environ.update(saved_topology)
+
+# --- device-env: topology emission + empty-override semantics ---------------
+device_env_script = os.path.join(ROOT, "system_files/usr/libexec/armada/device-env")
+devices_dir = os.path.join(ROOT, "system_files/usr/lib/armada/devices")
+
+def run_device_env(model, extra_env=None):
+    env = dict(os.environ, ARMADA_DEVICE_DIR=devices_dir, ARMADA_MODEL=model)
+    env.update(extra_env or {})
+    out = subprocess.check_output(["bash", device_env_script], env=env, text=True)
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+odin3 = run_device_env("AYN Odin 3")
+check("device-env SM8750 big", odin3.get("ARMADA_BIG_CORES") == "0-7")
+check("device-env SM8750 prime", odin3.get("ARMADA_PRIME_CORES") == "6-7")
+check("device-env SM8750 irq unrestricted", odin3.get("ARMADA_IRQ_CORES") == "''")
+check("device-env non-SM8250 Proton defaults",
+      odin3.get("ARMADA_PROTON_DEFAULTS") ==
+      "proton-experimental-arm64:proton_11-arm64:proton-cachyos-11.0-arm64")
+thor = run_device_env("AYN Thor")
+check("device-env SM8550 irq littles", thor.get("ARMADA_IRQ_CORES") == "0-2")
+thor_override = run_device_env("AYN Thor", {"ARMADA_IRQ_CORES": ""})
+check("device-env explicit-empty override honored",
+      thor_override.get("ARMADA_IRQ_CORES") == "''")
+pocket_ds = run_device_env("AYANEO Pocket DS")
+check("device-env Pocket DS enables sync suspend",
+      pocket_ds.get("ARMADA_SYNC_SUSPEND") == "1")
+pocket5 = run_device_env("Retroid Pocket 5")
+check("device-env SM8250 Proton defaults",
+      pocket5.get("ARMADA_PROTON_DEFAULTS") ==
+      "proton-cachyos-11.0-arm64")
+mangmi = run_device_env("MANGMI Air Y Pro")
+check("device-env MANGMI profile",
+      mangmi.get("ARMADA_DEVICE_ID") == "mangmi-air-y-pro" and
+      mangmi.get("ARMADA_SOC_CLASS") == "SM8250" and
+      mangmi.get("ARMADA_GAMESCOPE_FAKE_OUTPUT_MM") == "120x90" and
+      mangmi.get("ARMADA_IP_TARGETS") == "ds5")
+pocket_max = run_device_env("MANGMI Pocket Max")
+check("device-env MANGMI Pocket Max profile",
+      pocket_max.get("ARMADA_DEVICE_ID") == "mangmi-pocket-max" and
+      pocket_max.get("ARMADA_SOC_CLASS") == "SM8250" and
+      pocket_max.get("ARMADA_PANEL_ORIENTATION") == "left" and
+      pocket_max.get("ARMADA_IP_TARGETS") == "ds5")
+pocket_micro2 = run_device_env("AYANEO Pocket MICRO 2")
+check("device-env AYANEO Pocket MICRO 2 profile",
+      pocket_micro2.get("ARMADA_DEVICE_ID") == "ayaneo-pocket-micro2" and
+      pocket_micro2.get("ARMADA_SOC_CLASS") == "SM8250" and
+      pocket_micro2.get("ARMADA_PANEL_ORIENTATION") == "right" and
+      pocket_micro2.get("ARMADA_GAMESCOPE_FAKE_OUTPUT_MM") == "177x118")
+
+# --- armada-powerd: config parsing ------------------------------------------
+powerd = load_script("armada-powerd")
+factory = os.path.join(ROOT, "system_files/usr/share/armada/power-profiles.conf")
+powerd.FACTORY_CONFIG_FILE = powerd.Path(factory)
+powerd.CONFIG_FILE = powerd.Path(os.path.join(WORK, "no-such-etc.conf"))
+power = powerd.ArmadaPower.__new__(powerd.ArmadaPower)
+parsed = power.parse_config()
+(default_profile, underclocks, fan_curves, profile_config, fan_config,
+ suspend_config, system_config) = parsed
+check("factory default profile", default_profile == "balanced")
+check("factory has 3 fan curves", len(fan_curves) == 3)
+check("profiles keep governor", profile_config["performance"]["cpu_governor"] == "performance")
+check("no [system] -> irq auto", system_config["irq_cores"] == "auto")
+check("underclock tables parsed", "SM8550" in underclocks and "SM8750" in underclocks)
+
+etc = os.path.join(WORK, "etc-power.conf")
+with open(etc, "w") as f:
+    f.write("[system]\nirq_cores=0-2\n")
+powerd.CONFIG_FILE = powerd.Path(etc)
+check("[system] override parsed", power.parse_config()[6]["irq_cores"] == "0-2")
+
+power.system_config = {"irq_cores": "auto"}
+power.env = {"ARMADA_IRQ_CORES": "0-2"}
+check("irq auto mask", power.irq_mask() == 0b111)
+power.env = {"ARMADA_IRQ_CORES": ""}
+full_mask = sum(1 << c for c in ALL)
+check("irq auto empty = all", power.irq_mask() == full_mask)
+power.system_config = {"irq_cores": "garbage!"}
+check("irq bad falls back to all", power.irq_mask() == full_mask)
+
+# --- armada-control: PerfManager lifecycle ----------------------------------
+control = load_script("armada-control")
+gt.OVERRIDES_CONFIG = pathlib.Path(os.path.join(WORK, "game-tweaks.json"))
+ap.STATE_FILE = ap.pathlib.Path(os.path.join(WORK, "perf-state.json"))
+ap.device_env = lambda: dict(ENV)
+
+restart_calls = []
+real_control_run = control.run
+control.run = lambda command, timeout=20: restart_calls.append(command)
+try:
+    check("game mode restart action succeeds", control.action_restart_game_mode({}) == {"ok": True})
+    check("game mode restart requests sddm restart",
+          restart_calls == [["/usr/bin/systemctl", "--no-block", "restart", "sddm.service"]])
+finally:
+    control.run = real_control_run
+
+with gt.OVERRIDES_CONFIG.open("w") as f:
+    json.dump({"global": {"gamescopeNice": -5},
+               "games": {"620": {"scheduler": "cosmos",
+                                 "cores": "big", "nice": -4}}}, f)
+
+sel = selectors.DefaultSelector()
+manager = control.PerfManager(sel)
+state = ap.read_state()
+check("refresh writes global layer", state["global"].get("gamescopeNice") == -5)
+check("no override at startup", "override" not in state)
+
+child = subprocess.Popen(["sleep", "30"])
+try:
+    manager.game_launched("620", child.pid)
+    state = ap.read_state()
+    override = state.get("override", {})
+    check("override tracks pid", override.get("pid") == child.pid)
+    check("cosmos domain from cores", override.get("schedulerDomain") == [3, 4, 5, 6, 7])
+    check("pidfd armed", manager.pidfd is not None)
+
+    # live tweaks edit rebuilds the override instead of dropping it
+    with gt.OVERRIDES_CONFIG.open("w") as f:
+        json.dump({"global": {"gamescopeNice": -5},
+                   "games": {"620": {"scheduler": "lavd"}}}, f)
+    manager.refresh(keep_override=True)
+    override = ap.read_state().get("override", {})
+    check("keep_override survives edit", override.get("pid") == child.pid)
+    check("override rebuilt from new tweaks",
+          override.get("scheduler") == "lavd")
+
+    # a launch whose layer equals global still tracks the session
+    child2 = subprocess.Popen(["sleep", "30"])
+    try:
+        manager.game_launched(None, child2.pid)
+        override = ap.read_state().get("override", {})
+        check("plain launch still tracked", override.get("pid") == child2.pid)
+    finally:
+        child2.terminate()
+        child2.wait()
+finally:
+    child.terminate()
+    child.wait()
+
+manager.game_exited()
+check("exit restores globals", "override" not in ap.read_state())
+check("pidfd released", manager.pidfd is None)
+
+# session pid resolution: a fake Steam reaper ancestor is preferred over
+# the direct pid; a plain process falls back to itself
+fake_reaper = subprocess.Popen(["bash", "-c", "sleep 30; :", "SteamLaunch", "AppId=620"])
+try:
+    time.sleep(0.3)
+    kids = ap.child_pids(fake_reaper.pid)
+    check("fake reaper has a child", bool(kids))
+    if kids:
+        check("session pid walks up to the reaper",
+              manager.steam_session_pid(kids[0], "620") == fake_reaper.pid)
+        check("appid mismatch falls back to direct pid",
+              manager.steam_session_pid(kids[0], "999") == kids[0])
+finally:
+    fake_reaper.terminate()
+    fake_reaper.wait()
+nested_outer = subprocess.Popen([
+    "bash", "-c", 'bash -c "sleep 30; :" SteamLaunch AppId=620; :',
+    "SteamLaunch", "AppId=620"])
+try:
+    time.sleep(0.4)
+    inner = ap.child_pids(nested_outer.pid)
+    grand = ap.child_pids(inner[0]) if inner else []
+    check("nested wrappers spawned", bool(inner and grand))
+    if inner and grand:
+        check("nested wrappers resolve to the OUTERMOST",
+              manager.steam_session_pid(grand[0], "620") == nested_outer.pid)
+finally:
+    nested_outer.terminate()
+    nested_outer.wait()
+
+plain = subprocess.Popen(["sleep", "30"])
+try:
+    check("no reaper ancestor falls back to pid",
+          manager.steam_session_pid(plain.pid, "620") == plain.pid)
+finally:
+    plain.terminate()
+    plain.wait()
+
+# stale pidfd event from an earlier generation must not clear a new session
+childA = subprocess.Popen(["sleep", "30"])
+childB = subprocess.Popen(["sleep", "30"])
+try:
+    manager.game_launched("620", childA.pid)
+    stale_callback = sel.get_key(manager.pidfd).data
+    manager.game_launched("620", childB.pid)
+    stale_callback()  # old generation: must be ignored
+    check("stale pidfd event ignored",
+          ap.read_state().get("override", {}).get("pid") == childB.pid)
+    sel.get_key(manager.pidfd).data()  # current generation: must clear
+    check("current pidfd event clears", "override" not in ap.read_state())
+finally:
+    childA.terminate(); childA.wait()
+    childB.terminate(); childB.wait()
+
+# --- armada-control: socket protocol ----------------------------------------
+import socket as socketlib
+
+# absolute request deadline: a drip-feeding client gets cut off
+control.CLIENT_TIMEOUT = 1
+server, client = socketlib.socketpair()
+client.sendall(b"partial request without newline")
+start = time.monotonic()
+control.serve_client(server, lambda request, conn: {"never": True})
+elapsed = time.monotonic() - start
+check("stalled client cut off near deadline", 0.5 < elapsed < 3)
+reply = json.loads(client.recv(65536).decode().split("\n")[0])
+check("stall returns an error", reply.get("ok") is False)
+client.close()
+
+# handle_session: peercred pid is the caller (socketpair peer = this process)
+control.PERF = manager
+server, client = socketlib.socketpair()
+child3 = subprocess.Popen(["sleep", "30"])
+try:
+    result = control.handle_session({"action": "game_launched", "appid": "620"}, server)
+    check("session launch applied", result.get("applied") is True)
+    check("session override tracks caller pid",
+          ap.read_state().get("override", {}).get("pid") == os.getpid())
+    try:
+        control.handle_session({"action": "bogus"}, server)
+        check("unknown session action rejected", False)
+    except ValueError:
+        pass
+    try:
+        control.handle_session({"action": "game_launched", "appid": "not-a-number"}, server)
+        check("bad appid rejected", False)
+    except ValueError:
+        pass
+finally:
+    child3.terminate()
+    child3.wait()
+    server.close()
+    client.close()
+manager.game_exited()
+
+# --- armada-powerd: scx state machine ---------------------------------------
+class FakeProc:
+    def __init__(self, command, **kwargs):
+        FakeProc.launched.append(command)
+        self.returncode = None
+    def poll(self):
+        return self.returncode
+    def terminate(self):
+        self.returncode = 0
+    def wait(self, timeout=None):
+        return self.returncode
+    def kill(self):
+        self.returncode = -9
+
+FakeProc.launched = []
+real_popen, real_exists = powerd.subprocess.Popen, powerd.os.path.exists
+powerd.subprocess.Popen = FakeProc
+powerd.os.path.exists = lambda path: True
+try:
+    scx = powerd.ArmadaPower.__new__(powerd.ArmadaPower)
+    scx.scx_child = None
+    scx.scx_spec = None
+    scx.scx_failed = None
+    scx.scx_warned = set()
+
+    scx.enforce_scheduler({"scheduler": "lavd"})
+    lavd_command = ["/usr/bin/scx_lavd", "--pinned-slice-us", "500", "--dd-max-wait-us", "0"]
+    check("lavd started", FakeProc.launched[-1] == lavd_command)
+    scx.enforce_scheduler({"scheduler": "lavd"})
+    check("same spec not restarted", len(FakeProc.launched) == 1)
+
+    # crash, then a DIFFERENT spec must start immediately (no shared backoff)
+    scx.scx_child.returncode = 1
+    scx.enforce_scheduler({"scheduler": "cosmos", "schedulerDomain": [3, 4, 5, 6, 7]})
+    check("switch after crash starts immediately",
+          FakeProc.launched[-1] == ["/usr/bin/scx_cosmos", "--primary-domain", "3-7"])
+
+    # crash cosmos, retrying the SAME spec is backed off
+    scx.scx_child.returncode = 1
+    scx.enforce_scheduler({"scheduler": "cosmos", "schedulerDomain": [3, 4, 5, 6, 7]})
+    check("same failed spec backed off", len(FakeProc.launched) == 2)
+    scx.enforce_scheduler({"scheduler": "lavd"})
+    check("other spec unaffected by backoff", FakeProc.launched[-1] == lavd_command)
+
+    scx.enforce_scheduler({"scheduler": "eevdf"})
+    check("eevdf stops scx child", scx.scx_child is None and scx.scx_spec is None)
+
+    # a running scheduler must STOP even when the newly requested spec is
+    # backed off: fallback is EEVDF, never a stale different scx
+    scx.scx_failed = None
+    scx.enforce_scheduler({"scheduler": "lavd"})
+    scx.scx_child.returncode = 1
+    scx.enforce_scheduler({"scheduler": "cosmos", "schedulerDomain": [3, 4, 5, 6, 7]})
+    check("cosmos running after lavd crash", scx.scx_spec is not None)
+    scx.enforce_scheduler({"scheduler": "lavd"})  # lavd still backed off
+    check("mismatched scheduler stopped during backoff",
+          scx.scx_child is None and scx.scx_spec is None)
+finally:
+    powerd.subprocess.Popen = real_popen
+    powerd.os.path.exists = real_exists
+
+# --- armada-powerd: perf_tick never leaks (it runs inside the fan loop) -----
+tick = powerd.ArmadaPower.__new__(powerd.ArmadaPower)
+tick.scx_child = None
+tick.scx_spec = None
+tick.scx_failed = None
+tick.scx_warned = set()
+with ap.STATE_FILE.open("w") as f:
+    f.write("{ not json")
+tick.perf_tick()  # corrupt state file: read_state -> {}
+real_apply = ap.apply_gamescope
+ap.apply_gamescope = lambda values: (_ for _ in ()).throw(RuntimeError("boom"))
+try:
+    tick.perf_tick()  # enforcement raising must not escape into fan_tick
+finally:
+    ap.apply_gamescope = real_apply
+check("perf_tick contains exceptions", True)
+
+# --- plugin: tweaks sanitize keeps the flat perf keys -----------------------
+sys.path.insert(0, os.path.join(ROOT, "decky/armada-control/py_modules"))
+from armada_control import tweaks as plugin_tweaks
+
+gt.OVERRIDES_CONFIG = pathlib.Path(WORK) / "missing-plugin-tweaks.json"
+plugin_defaults = plugin_tweaks.load_tweaks()
+check("plugin loads factory gamescope nice", plugin_defaults["global"]["gamescopeNice"] == -20)
+check("plugin loads factory Vulkan realtime",
+      plugin_defaults["global"]["gamescopeVulkanRealtime"] is True)
+gt.OVERRIDES_CONFIG.write_text(json.dumps({
+    "games": {"620": {"enabled": False, "nice": -5}},
+}), encoding="utf-8")
+disabled_game = plugin_tweaks.load_tweaks()["games"]["620"]
+check("plugin preserves disabled games",
+      disabled_game == {"enabled": False, "nice": -5})
+check("plugin saves disabled games unchanged",
+      plugin_tweaks.tweak_overrides(plugin_tweaks.load_tweaks())["games"]["620"] ==
+      {"enabled": False, "nice": -5})
+gt.OVERRIDES_CONFIG.unlink()
+overrides = plugin_tweaks.tweak_overrides({
+    "global": factory_global,
+    "games": {},
+})
+check("factory values stay out of user overrides", overrides["global"] == {})
+overrides = plugin_tweaks.tweak_overrides({
+    "global": {**factory_global, "fexProfile": "fast", "gamescopeNice": 0,
+               "gamescopeVulkanRealtime": False},
+    "games": {},
+})
+check("factory deviations remain explicit",
+      overrides["global"] == {"fexProfile": "fast", "gamescopeNice": 0,
+                              "gamescopeVulkanRealtime": False})
+
+clean = plugin_tweaks.sanitize_tweaks({
+    "global": {"gamescopeNice": -5, "cores": "big"},
+    "games": {"620": {"nice": 0, "scheduler": "lavd", "env": {"A": "1"}},
+              "not-a-number": {"nice": 1}},
+})
+check("tweaks keeps global perf keys", clean["global"]["cores"] == "big")
+check("tweaks keeps per-game perf keys", clean["games"]["620"]["scheduler"] == "lavd")
+check("tweaks drops non-numeric appids", "not-a-number" not in clean["games"])
+try:
+    plugin_tweaks.sanitize_tweaks({"global": {"x": "y" * (300 * 1024)}, "games": {}})
+    check("oversize tweaks rejected", False)
+except ValueError:
+    pass
+
+plugin_tweaks.COMPAT_APPLIED_STATE = pathlib.Path(WORK) / "compat-applied.json"
+legacy_state = plugin_tweaks.load_compat_applied()
+check("missing compat state is normalized",
+      legacy_state == {"appids": [], "protonDefault": ""})
+plugin_tweaks.COMPAT_APPLIED_STATE.write_text(
+    json.dumps({"appids": ["620"]}), encoding="utf-8")
+legacy_state = plugin_tweaks.load_compat_applied()
+check("legacy compat state has no recorded factory default",
+      legacy_state == {"appids": ["620"], "protonDefault": ""})
+plugin_tweaks.COMPAT_APPLIED_STATE.write_text(json.dumps({
+    "appids": ["620", 620, "bad"],
+    "protonDefault": "proton-cachyos-11.0-arm64",
+}), encoding="utf-8")
+loaded_state = plugin_tweaks.load_compat_applied()
+check("compat state loads appids and factory default",
+      loaded_state == {"appids": ["620"],
+                       "protonDefault": "proton-cachyos-11.0-arm64"})
+compat_writes = []
+real_plugin_call = plugin_tweaks.call
+plugin_tweaks.call = lambda action, **payload: compat_writes.append((action, payload))
+try:
+    saved_state = plugin_tweaks.save_compat_applied(["9", "2", "bad"])
+    saved_payload = json.loads(compat_writes[-1][1]["text"])
+    check("appid-only save preserves factory default",
+          saved_state == saved_payload == {
+              "appids": ["2", "9"],
+              "protonDefault": "proton-cachyos-11.0-arm64",
+          })
+    saved_state = plugin_tweaks.save_compat_applied(["9"], "proton-experimental-arm64")
+    saved_payload = json.loads(compat_writes[-1][1]["text"])
+    check("startup save advances factory default",
+          saved_state == saved_payload == {
+              "appids": ["9"],
+              "protonDefault": "proton-experimental-arm64",
+          })
+finally:
+    plugin_tweaks.call = real_plugin_call
+
+# --- plugin: power render with editable governor ----------------------------
+sys.path.insert(0, os.path.join(ROOT, "decky/armada-control/py_modules"))
+from armada_control import power as plugin_power
+
+plugin_power.FACTORY_POWER_CONFIG = plugin_power.Path(factory)
+plugin_power.POWER_CONFIG = plugin_power.Path(os.path.join(WORK, "etc-armada-power.conf"))
+data = plugin_power.parse_power()
+factory_data = plugin_power.parse_power(plugin_power.FACTORY_POWER_CONFIG)
+check("governor exposed in parse", data["profiles"]["eco"]["cpu_governor"] == "conservative")
+
+# untouched config renders no /etc profile sections (factory keeps tracking /usr)
+rendered = plugin_power.render_power(data, factory_data)
+check("unedited render stays factory-tracking", "[profile.eco]" not in rendered)
+
+# editing only the governor writes the override
+data["profiles"]["eco"]["cpu_governor"] = "performance"
+rendered = plugin_power.render_power(data, factory_data)
+check("edited governor written", "cpu_governor = performance" in rendered)
+check("other profiles untouched", "[profile.performance]" not in rendered)
+
+if failures:
+    print(f"{len(failures)} check(s) failed", file=sys.stderr)
+    sys.exit(1)
+print("all perf-settings checks passed")
+PYEOF
+
+echo "PASS: perf-settings-test"

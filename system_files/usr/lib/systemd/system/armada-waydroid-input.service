@@ -1,0 +1,13 @@
+[Unit]
+Description=Share InputPlumber controllers with Waydroid
+BindsTo=waydroid-container.service
+After=waydroid-container.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/armada/waydroid-input-setup
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=waydroid-container.service

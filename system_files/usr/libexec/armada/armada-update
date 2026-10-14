@@ -1,0 +1,94 @@
+#!/bin/bash
+# Steam's update protocol requires exit 0 for success and 7 for no update or failure.
+set -uo pipefail
+source /usr/lib/armada/update-lib
+
+check=0
+for arg in "$@"; do
+    case "${arg}" in
+        --supports-duplicate-detection) exit 0 ;;
+        check) check=1 ;;
+    esac
+done
+
+fail() {
+    armada_update_log "$1"
+    exit 7
+}
+
+command -v bootc >/dev/null || fail "bootc is unavailable"
+reserve_bytes=$(armada_update_reserve_bytes) || fail "Could not determine the update storage reserve"
+
+booted_ref=$(armada_booted_ref)
+booted=$(armada_tag_from_ref "$booted_ref")
+target=$(armada_update_target "$booted_ref") || fail "Could not determine the update target"
+read -r repository desired <<<"$target"
+case "$booted_ref" in ostree-image-signed:*) verified=1 ;; *) verified=0 ;; esac
+
+# Steam suppresses previously applied versions, so successful checks must print a per-build identity.
+if [ "${check}" = 1 ]; then
+    read -r b_digest s_digest s_ref s_ver <<<"$(armada_local_state)" || true
+    [ "${b_digest:-}" = "-" ] && b_digest=""
+    [ "${s_digest:-}" = "-" ] && s_digest=""
+    [ "${s_ref:-}" = "-" ] && s_ref=""
+    [ "${s_ver:-}" = "-" ] && s_ver=""
+    [ -n "${b_digest}" ] || fail "Could not read the booted deployment"
+    staged=$(armada_tag_from_ref "${s_ref}")
+    remote_info=$(armada_remote_info "${desired}" "${repository}")
+    remote_status=$?
+    if [ "${remote_status}" != 0 ]; then
+        armada_log_remote_info_failure "${remote_status}" "${repository}:${desired}"
+        fail "Could not inspect the update target"
+    fi
+    read -r r_required r_digest r_ver <<<"${remote_info}"
+    [ "${r_ver:-}" = "-" ] && r_ver=""
+    if [ -z "${r_digest:-}" ] || ! [[ "${r_required:-}" =~ ^[0-9]+$ ]]; then
+        armada_update_log "update target ${repository}:${desired} returned incomplete metadata"
+        fail "The update target returned incomplete metadata"
+    fi
+    if [ "${staged}" != "${desired}" ] && { [ "${desired}" != "${booted}" ] || [ -n "${staged}" ]; }; then
+        armada_update_fits "${r_required}" "${reserve_bytes}" || fail "Not enough free space for the update"
+        printf '%s\n' "${r_ver:-${r_digest}}"
+        exit 0
+    fi
+    # bootc upgrade --check caches its verdict; registry digests allow fresh comparisons.
+    if [ "${r_digest}" != "${b_digest}" ] && [ "${r_digest}" != "${s_digest}" ]; then
+        armada_update_fits "${r_required}" "${reserve_bytes}" || fail "Not enough free space for the update"
+        printf '%s\n' "${r_ver:-${r_digest}}"
+        exit 0
+    fi
+    if [ -n "${s_digest}" ]; then
+        # Steam maps the reprinted staged version to restart-pending.
+        printf '%s\n' "${s_ver:-${s_digest}}"
+        exit 0
+    fi
+    exit 7
+fi
+
+# Free space may have changed since the availability check.
+remote_info=$(armada_remote_info "${desired}" "${repository}")
+remote_status=$?
+if [ "${remote_status}" != 0 ]; then
+    armada_log_remote_info_failure "${remote_status}" "${repository}:${desired}"
+    exit 7
+fi
+read -r r_required _ <<<"${remote_info}"
+armada_update_fits "${r_required:-}" "${reserve_bytes}" || exit 7
+
+staged=$(armada_tag_from_ref "$(armada_staged_ref)")
+
+# Shutdown regenerates /KERNEL after deployment finalization.
+if [ "${staged}" != "${desired}" ] && { [ "${desired}" != "${booted}" ] || [ -n "${staged}" ]; } || [ "${verified}" = 0 ]; then
+    if ! armada_bootc_with_progress bootc switch --enforce-container-sigpolicy "${repository}:${desired}"; then
+        if armada_steam_channels_apply "$repository" "$desired"; then
+            # Unpublished channels must not trigger repeated update offers.
+            mkdir -p "$(dirname "${ARMADA_CHANNEL_STATE}")" 2>/dev/null
+            printf '%s\n' "${booted}" > "${ARMADA_CHANNEL_STATE}" 2>/dev/null \
+                || echo "armada-update: could not revert channel state to ${booted}" >&2
+        fi
+        exit 7
+    fi
+else
+    armada_bootc_with_progress bootc upgrade || exit 7
+fi
+exit 0

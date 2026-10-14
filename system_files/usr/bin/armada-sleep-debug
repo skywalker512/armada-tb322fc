@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+set -uo pipefail
+
+if [[ ${1:-} == details ]]; then
+    shift
+    set -- report --details "$@"
+fi
+exec /usr/bin/python3 "${ARMADA_SLEEP_DEBUG_LIB:-/usr/lib/armada/armada_sleep_debug.py}" "$@"

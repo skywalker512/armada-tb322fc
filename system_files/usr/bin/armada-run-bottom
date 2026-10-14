@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+
+# Runs a command as a client of the bottom-screen gamescope.
+
+fail() {
+    echo "armada-run-bottom: $*" >&2
+    exit 1
+}
+
+[[ "${1:-}" == -- ]] || fail "usage: armada-run-bottom -- <command> [args...]"
+shift
+(( $# > 0 )) || fail "no command specified"
+
+env_file="${XDG_RUNTIME_DIR:-/run/user/$UID}/armada-bottom-env"
+[[ -r "$env_file" ]] || fail "bottom screen is not running"
+set -a
+source "$env_file"
+set +a
+exec "$@"
