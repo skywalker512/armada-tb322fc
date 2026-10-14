@@ -1,0 +1,35 @@
+From e13a497faa67ddab3ec3785c86316c0e52fdcf76 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Sat, 26 Sep 2026 01:55:26 +0800
+Subject: [PATCH 01/48] drm/msm/dpu: restore the core clock OPP before runtime
+ register access
+
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index dcee66588..70a71c612 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -1599,6 +1599,17 @@ static int __maybe_unused dpu_runtime_resume(struct device *dev)
+ 
+ 	ddev = dpu_kms->dev;
+ 
++	/*
++	 * CRTC disable may have dropped the OPP vote without changing the
++	 * core clock rate. Restore the vote before enabling clocks and
++	 * accessing registers; atomic_flush updates scanout performance later.
++	 */
++	rc = dev_pm_opp_set_rate(dev, dpu_kms_get_clk_rate(dpu_kms, "core"));
++	if (rc) {
++		DPU_ERROR("failed to restore core clock OPP rc:%d\n", rc);
++		return rc;
++	}
++
+ 	rc = clk_bulk_prepare_enable(dpu_kms->num_clocks, dpu_kms->clocks);
+ 	if (rc) {
+ 		DPU_ERROR("clock enable failed rc:%d\n", rc);
+-- 
+2.54.0 (Apple Git-157)
+

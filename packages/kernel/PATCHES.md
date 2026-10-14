@@ -799,3 +799,250 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0505a-arm64-unaligned-atomics-cover-the-load128-store-exclusive.patch`
   source: armada
   upstream: local
+
+# Lenovo TB322FC (elden)
+
+Board-specific changes imported from `https://github.com/h0cheung/tb322fc-linux-kernel` at pin `6f97250ead155fc3b980856323e99a4623dae73d` (branch `v7.2.8-elden`, rebased onto Linux 7.2.6 + the Armada series).
+The board devicetree ships as `dts/sm8750-lenovo-elden.dts` (no patch); its `sm8750-lenovo-elden` dtb is registered in `system_files/usr/lib/armada/supported-dtbs`.
+
+`0800`-`0802` are intentionally omitted: h0cheung distro-only changes (Android wrapped-key userdata fscrypt/dm-default-key, an ntsync selftest fix, and distro `.config` fragments) that would alter the common kernel for all devices.
+
+- `patches/0803-drm-msm-dpu-restore-the-core-clock-OPP-before-runtim.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm/dpu: restore the core clock OPP before runtime
+
+- `patches/0804-clk-qcom-gdsc-pair-the-GX-do-nothing-enable-with-a-m.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: clk: qcom: gdsc: pair the GX "do nothing" enable with a
+
+- `patches/0805-media-platform-qcom-iris-defer-CAPTURE-queue-bring-u.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: media: platform: qcom: iris: defer CAPTURE queue
+
+- `patches/0806-wifi-ath12k-don-t-leave-the-HAL-torn-down-after-a-fa.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: wifi: ath12k: don't leave the HAL torn down after a
+
+- `patches/0807-soc-qcom-apr-install-the-GPR-callback-before-probing.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: soc: qcom: apr: install the GPR callback before probing
+
+- `patches/0808-arm64-dts-qcom-sm8750-add-GPU-cooling.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: arm64: dts: qcom: sm8750: add GPU cooling
+
+- `patches/0809-drm-msm-adreno-a8xx-force-GX-GDSC-collapse-before-CX.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm: adreno a8xx: force GX GDSC collapse before CX
+
+- `patches/0810-clk-qcom-gxclkctl-kaanapali-don-t-poll-CFG_GDSCR-for.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: clk: qcom: gxclkctl-kaanapali: don't poll CFG_GDSCR for
+
+- `patches/0811-arm64-dts-qcom-sm8750-reserve-the-low-IOVA-range-for.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: arm64: dts: qcom: sm8750: reserve the low IOVA range
+
+- `patches/0812-iommu-arm-smmu-prepare-the-clocks-from-runtime-PM-no.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: iommu/arm-smmu: prepare the clocks from runtime PM, not
+
+- `patches/0813-media-iris-defer-Gen2-DPB-buffer-destruction.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: media: iris: defer Gen2 DPB buffer destruction
+
+- `patches/0814-media-iris-allow-larger-capture-buffer-pools-on-HFI-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: media: iris: allow larger capture buffer pools on HFI
+
+- `patches/0815-media-iris-fix-frame-interval-enumeration-for-non-di.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: media: iris: fix frame interval enumeration for
+
+- `patches/0816-media-iris-drop-the-deferred-CAPTURE-state-when-the-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: media: iris: drop the deferred CAPTURE state when the
+
+- `patches/0817-drm-msm-dpu-disable-the-slave-encoder-before-the-mas.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm/dpu: disable the slave encoder before the
+
+- `patches/0818-drm-msm-dpu-compute-the-CRTC-bandwidth-from-the-stat.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm/dpu: compute the CRTC bandwidth from the state
+
+- `patches/0819-media-iris-don-t-wait-for-the-threaded-IRQ-handler-u.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: media: iris: don't wait for the threaded IRQ handler
+
+- `patches/0820-cpuidle-psci-domain-add-allow_cluster_off-to-refuse-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: cpuidle: psci-domain: add allow_cluster_off to refuse
+
+- `patches/0821-wifi-ath12k-keep-the-RX-refill-ring-from-running-dry.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: wifi: ath12k: keep the RX refill ring from running dry
+
+- `patches/0822-net-qrtr-ns-retry-announcements-the-new-node-is-not-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: net: qrtr: ns: retry announcements the new node is not
+
+- `patches/0823-rpmsg-qcom_glink-fix-deadlock-during-endpoint-teardo.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: rpmsg: qcom_glink: fix deadlock during endpoint
+
+- `patches/0824-remoteproc-qcom-check-glink-edge-in-glink_subdev_sto.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: remoteproc: qcom: check glink->edge in
+
+- `patches/0825-usb-typec-ucsi-glink-set-initial-orientation-during-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: usb: typec: ucsi: glink: set initial orientation during
+
+- `patches/0826-wifi-ath12k-arm-the-connection-loss-timer-only-while.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: wifi: ath12k: arm the connection-loss timer only while
+
+- `patches/0827-wifi-ath12k-shorten-the-MHI-probe-timeout-to-3s.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: wifi: ath12k: shorten the MHI probe timeout to 3s
+
+- `patches/0828-firmware-psci-map-reboot-reason-to-SM8750-SYSTEM_RES.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: firmware: psci: map reboot reason to SM8750
+
+- `patches/0829-power-supply-qcom_battmgr-omit-SM8750-maximum-load-p.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: power: supply: qcom_battmgr: omit SM8750 maximum-load
+
+- `patches/0830-usb-typec-ucsi-Y700-let-a-USB-less-power-source-yiel.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: usb: typec: ucsi: Y700: let a USB-less power source
+
+- `patches/0831-pmdomain-qcom-rpmhpd-floor-the-SM8750-GMU-rails-low-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: pmdomain: qcom: rpmhpd: floor the SM8750 GMU rails low
+
+- `patches/0832-drm-msm-dpu-stop-the-video-pipeline-before-the-timin.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm/dpu: stop the video pipeline before the timing
+
+- `patches/0833-power-supply-qcom_battmgr-poll-battery-capacity-peri.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: power: supply: qcom_battmgr: poll battery capacity
+
+- `patches/0834-ASoC-qcom-q6apm-lpass-dais-start-the-MI2S-BE-graph-a.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: ASoC: qcom: q6apm-lpass-dais: start the MI2S BE graph
+
+- `patches/0835-drm-msm-dpu-sm8750-add-the-missing-DSI-GC-gamma-sub-.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm/dpu: sm8750: add the missing DSI GC (gamma)
+
+- `patches/0836-drm-msm-dsi-round-the-6G-byte-clock-to-a-PLL-achieva.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: drm/msm/dsi: round the 6G byte clock to a
+
+- `patches/0837-elden-dt-bindings-bindings-for-Y700-Gen4-hardware.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: dt-bindings: bindings for Y700 Gen4 hardware
+
+- `patches/0838-elden-arm64-clk-sm8750-platform-plumbing-for-Y700-Ge.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: arm64/clk: sm8750 platform plumbing for Y700
+
+- `patches/0839-elden-bluetooth-WCN7861-Peach-support.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: bluetooth: WCN7861 (Peach) support
+
+- `patches/0840-elden-drm-msm-sm8750-dsi-dpu-adreno-board-support.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: drm-msm: sm8750 dsi/dpu/adreno board support
+
+- `patches/0841-elden-panel-novatek-nt36536-driver.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: panel: novatek nt36536 driver
+
+- `patches/0842-elden-input-aw86927-haptics-nvt36xxx-touch-compat-me.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: input: aw86927 haptics, nvt36xxx touch, compat
+
+- `patches/0843-elden-media-sm8750-camss-sensor-drivers-cci-halt.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: media: sm8750 camss, sensor drivers, cci halt
+
+- `patches/0844-elden-ath12k-WCN7861-hw-entry-and-QDSS-trace-config.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: ath12k: WCN7861 hw entry and QDSS trace config
+
+- `patches/0845-elden-pcie-qcom-controller-and-qmp-phy-changes.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: pcie: qcom controller and qmp phy changes
+
+- `patches/0846-elden-pmdomain-rpmhpd-presync-floor.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: pmdomain: rpmhpd presync floor
+
+- `patches/0847-elden-power-WCN7861-pwrseq-wl2868c-regulator-battmgr.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: power: WCN7861 pwrseq, wl2868c regulator,
+
+- `patches/0848-elden-usb-dwc3-dual-port-handover-and-s2idle-host-mo.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: usb: dwc3 dual-port handover and s2idle host
+
+- `patches/0849-elden-sound-aw88461-codec-and-audioreach-q6apm-updat.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: sound: aw88461 codec and audioreach/q6apm
+
+- `patches/0850-elden-misc-smmu-flash-led-ptn3222-q6v5-handover-irq.patch`
+  source: https://github.com/h0cheung/tb322fc-linux-kernel
+  upstream: local (elden pin 6f97250ead15)
+  notes: elden: misc: smmu, flash led, ptn3222, q6v5 handover

@@ -1,0 +1,71 @@
+From 2792030352d363b0c184dd91a9d9059d8d82cd96 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 16:13:02 +0800
+Subject: [PATCH 31/48] power: supply: qcom_battmgr: poll battery capacity
+ periodically
+
+---
+ drivers/power/supply/qcom_battmgr.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 104828913..34e7c4847 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -336,6 +336,7 @@ struct qcom_battmgr {
+ 	struct qcom_battmgr_wireless wireless;
+ 
+ 	struct work_struct enable_work;
++	struct delayed_work poll_work;
+ 
+ 	/*
+ 	 * @lock is used to prevent concurrent power supply requests to the
+@@ -1668,6 +1669,23 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
+ 		dev_err(battmgr->dev, "failed to request power notifications\n");
+ }
+ 
++/*
++ * The ADSP firmware does not push periodic battery updates; the percentage
++ * only moves when something reads sysfs (which triggers a property GET to
++ * the firmware). While a game is running nothing reads the battery, so the
++ * percentage freezes and low-battery warnings never fire.
++ */
++static void qcom_battmgr_poll_work(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr,
++						    poll_work.work);
++
++	qcom_battmgr_bat_sm8350_update(battmgr, POWER_SUPPLY_PROP_CAPACITY);
++	power_supply_changed(battmgr->bat_psy);
++
++	schedule_delayed_work(&battmgr->poll_work, 30 * HZ);
++}
++
+ static void qcom_battmgr_pdr_notify(void *priv, int state)
+ {
+ 	struct qcom_battmgr *battmgr = priv;
+@@ -1675,8 +1693,10 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+ 	if (state == SERVREG_SERVICE_STATE_UP) {
+ 		battmgr->service_up = true;
+ 		schedule_work(&battmgr->enable_work);
++		schedule_delayed_work(&battmgr->poll_work, 30 * HZ);
+ 	} else {
+ 		battmgr->service_up = false;
++		cancel_delayed_work_sync(&battmgr->poll_work);
+ 	}
+ }
+ 
+@@ -1795,6 +1815,10 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 				   qcom_battmgr_enable_worker);
+ 	if (ret)
+ 		return ret;
++	ret = devm_delayed_work_autocancel(dev, &battmgr->poll_work,
++					   qcom_battmgr_poll_work);
++	if (ret)
++		return ret;
+ 
+ 	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
+ 						       qcom_battmgr_callback,
+-- 
+2.54.0 (Apple Git-157)
+

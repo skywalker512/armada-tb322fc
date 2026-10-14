@@ -1,0 +1,107 @@
+From 1fe773cc974ed147cd3affe8fa3ba9b9626330cf Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 16:53:54 +0800
+Subject: [PATCH 10/48] iommu/arm-smmu: prepare the clocks from runtime PM, not
+ from probe
+
+arm_smmu_device_probe() prepared the clock bulk once and left it prepared;
+runtime PM only toggled clk_bulk_enable()/clk_bulk_disable() on top of that,
+and only system suspend ever unprepared. On qcom platforms the clk core holds
+a runtime PM reference on the clock provider for as long as a clock is
+prepared, so an SMMU that has been runtime suspended since boot still keeps
+its clock controller resumed.
+
+Measured on the Y700 before this change:
+
+  gpu_cc_hlos1_vote_gpu_smmu_clk  enable=0  prepare=1   (consumer iommu@3da0000)
+
+and it was the only clock in the whole system with that pattern, so the GPU
+clock controller (and its RPMH parents) never idle-suspended.
+
+Move the prepare into arm_smmu_runtime_resume()/suspend() so the reference is
+dropped when the SMMU suspends.
+
+Imported from BigfootACA/linux full-v7.1.3 (e8754905f0), the Xiaomi Pad 8
+Pro (xiaomi-piano, SM8750) mainline tree. Original author: Junhao Xie
+<bigfoot@radxa.com>.
+---
+ drivers/iommu/arm/arm-smmu/arm-smmu.c | 34 +++++----------------------
+ 1 file changed, 6 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu.c b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+index 0bd21d206..66c16f9b3 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+@@ -2274,9 +2274,7 @@ static void arm_smmu_device_shutdown(struct platform_device *pdev)
+ 	if (pm_runtime_enabled(smmu->dev))
+ 		pm_runtime_force_suspend(smmu->dev);
+ 	else
+-		clk_bulk_disable(smmu->num_clks, smmu->clks);
+-
+-	clk_bulk_unprepare(smmu->num_clks, smmu->clks);
++		clk_bulk_disable_unprepare(smmu->num_clks, smmu->clks);
+ }
+ 
+ static void arm_smmu_device_remove(struct platform_device *pdev)
+@@ -2294,7 +2292,7 @@ static int __maybe_unused arm_smmu_runtime_resume(struct device *dev)
+ 	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
+ 	int ret;
+ 
+-	ret = clk_bulk_enable(smmu->num_clks, smmu->clks);
++	ret = clk_bulk_prepare_enable(smmu->num_clks, smmu->clks);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -2307,45 +2305,25 @@ static int __maybe_unused arm_smmu_runtime_suspend(struct device *dev)
+ {
+ 	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
+ 
+-	clk_bulk_disable(smmu->num_clks, smmu->clks);
++	clk_bulk_disable_unprepare(smmu->num_clks, smmu->clks);
+ 
+ 	return 0;
+ }
+ 
+ static int __maybe_unused arm_smmu_pm_resume(struct device *dev)
+ {
+-	int ret;
+-	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
+-
+-	ret = clk_bulk_prepare(smmu->num_clks, smmu->clks);
+-	if (ret)
+-		return ret;
+-
+ 	if (pm_runtime_suspended(dev))
+ 		return 0;
+ 
+-	ret = arm_smmu_runtime_resume(dev);
+-	if (ret)
+-		clk_bulk_unprepare(smmu->num_clks, smmu->clks);
+-
+-	return ret;
++	return arm_smmu_runtime_resume(dev);
+ }
+ 
+ static int __maybe_unused arm_smmu_pm_suspend(struct device *dev)
+ {
+-	int ret = 0;
+-	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
+-
+ 	if (pm_runtime_suspended(dev))
+-		goto clk_unprepare;
+-
+-	ret = arm_smmu_runtime_suspend(dev);
+-	if (ret)
+-		return ret;
++		return 0;
+ 
+-clk_unprepare:
+-	clk_bulk_unprepare(smmu->num_clks, smmu->clks);
+-	return ret;
++	return arm_smmu_runtime_suspend(dev);
+ }
+ 
+ static const struct dev_pm_ops arm_smmu_pm_ops = {
+-- 
+2.54.0 (Apple Git-157)
+

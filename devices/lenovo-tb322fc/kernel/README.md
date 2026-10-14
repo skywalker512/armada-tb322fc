@@ -3,7 +3,10 @@
 ## 来源
 
 - 源码 pin：`sources.json` → `h0cheung/tb322fc-linux-kernel @ 6f97250e`
-  （上游 `GEEKiDoS/linux` 分支 `v7.2-elden`，基线 Linux 7.2，release 串 `7.2.0-y700+`）。
+  （h0cheung 分支 `v7.2.8-elden`，基线 Linux 7.2.8 + 75 个 elden 提交；上游源自 `GEEKiDoS/linux` `v7.2-elden`）。
+- **Armada 集成**：上述提交已按 enij90 惯例并入通用内核（Linux 7.2.6）——`packages/kernel/patches/0803-0850`、
+  `packages/kernel/dts/sm8750-lenovo-elden.dts`、`supported-dtbs`、overrides elden 小节；h0cheung 发行版专属改动
+  （0800-0802：Android userdata fscrypt、selftests、config fragment）及 defconfig/BUILTIN_DTB 改动均未带入。
 - 构建/验证流程：直接用 h0cheung umbrella 的 `scripts/fetch-sources.py` +
   `scripts/build-boot.sh`，产物 `boot.img`/`Image`/`sm8750-lenovo-elden.dtb`。
   不在本仓 vendor 内核源码。

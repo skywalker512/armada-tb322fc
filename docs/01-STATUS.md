@@ -1,6 +1,6 @@
 # 01 · 硬件功能状态矩阵（TB322FC / SM8750 / elden）
 
-来源：主线补丁 v2（2026-07-26）、**h0cheung/tb322fc-linux 实测表**（kernel pin `09e22021`，2026-10-11）、
+来源：主线补丁 v2（2026-07-26）、**h0cheung/tb322fc-linux 实测表**（kernel pin `6f97250e` @ `v7.2.8-elden`，2026-10-11）、
 xiaquwan1001 工作区（Q28/Q24/#106 记录）。比 Phoronix 报道时点的状态新很多——下游树已点亮大半。
 
 | 功能 | 主线 | h0cheung/GEEKiDoS 下游树（真机） | 备注 |

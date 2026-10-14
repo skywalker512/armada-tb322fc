@@ -1,0 +1,80 @@
+From cfc60e751c71110f90f18244b7aa778b83823fe9 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Sat, 10 Oct 2026 23:54:04 +0800
+Subject: [PATCH 21/48] rpmsg: qcom_glink: fix deadlock during endpoint
+ teardown
+
+The rpmsg core invokes destroy_ept() for a default endpoint while holding
+the rpmsg device lock. The GLINK implementation used to unregister the
+same rpmsg device synchronously from that path, re-acquiring the lock and
+deadlocking when a client such as FastRPC is unbound.
+
+That part is already fixed in this tree by upstream commit 5a5a48e788e0
+(backported as e559626be), which dropped the redundant unregister from
+qcom_glink_destroy_ept() entirely; the rpmsg device is now only torn down
+from the CLOSE / CLOSE_ACK paths. Keep that upstream approach.
+
+Port the remaining hardening from Bigfoot commit d54161ae21 that our tree
+lacks:
+
+ - Use xchg() in qcom_glink_remove_rpmsg_device() so the two close paths
+   (rx_close and rx_close_ack) can no longer unregister the same rpmsg
+   device twice.
+ - Record the owning rpmsg device on the default endpoint
+   (channel->ept.rpdev) where rpdev->ept is assigned, so the endpoint's
+   rpdev reference is valid for the rx callback and flow callback.
+
+The Bigfoot conditional (deferring removal for the default endpoint in
+destroy_ept) is intentionally not re-added: upstream removed that call
+outright, which is a strict superset of the deferral.
+
+Ported from BigfootACA/linux d54161ae21, adapted to our tree.
+---
+ drivers/rpmsg/qcom_glink_native.c | 17 ++++++++++-------
+ 1 file changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/rpmsg/qcom_glink_native.c b/drivers/rpmsg/qcom_glink_native.c
+index fda1ddda0..8e59ada7e 100644
+--- a/drivers/rpmsg/qcom_glink_native.c
++++ b/drivers/rpmsg/qcom_glink_native.c
+@@ -1399,13 +1399,14 @@ static void qcom_glink_remove_rpmsg_device(struct qcom_glink *glink, struct glin
+ {
+ 	struct rpmsg_channel_info chinfo;
+ 
+-	if (channel->rpdev) {
+-		strscpy_pad(chinfo.name, channel->name, sizeof(chinfo.name));
+-		chinfo.src = RPMSG_ADDR_ANY;
+-		chinfo.dst = RPMSG_ADDR_ANY;
+-		rpmsg_unregister_device(glink->dev, &chinfo);
+-	}
+-	channel->rpdev = NULL;
++	/* xchg() so two concurrent close paths can't unregister twice */
++	if (!xchg(&channel->rpdev, NULL))
++		return;
++
++	strscpy_pad(chinfo.name, channel->name, sizeof(chinfo.name));
++	chinfo.src = RPMSG_ADDR_ANY;
++	chinfo.dst = RPMSG_ADDR_ANY;
++	rpmsg_unregister_device(glink->dev, &chinfo);
+ }
+ 
+ static void qcom_glink_destroy_ept(struct rpmsg_endpoint *ept)
+@@ -1675,6 +1676,7 @@ static int qcom_glink_rx_open(struct qcom_glink *glink, unsigned int rcid,
+ 		}
+ 
+ 		rpdev->ept = &channel->ept;
++		channel->ept.rpdev = rpdev;
+ 		strscpy(rpdev->id.name, name);
+ 		rpdev->src = RPMSG_ADDR_ANY;
+ 		rpdev->dst = RPMSG_ADDR_ANY;
+@@ -1878,6 +1880,7 @@ static int qcom_glink_create_chrdev(struct qcom_glink *glink)
+ 	channel->rpdev = rpdev;
+ 
+ 	rpdev->ept = &channel->ept;
++	channel->ept.rpdev = rpdev;
+ 	rpdev->ops = &glink_device_ops;
+ 	rpdev->dev.parent = glink->dev;
+ 	rpdev->dev.release = qcom_glink_device_release;
+-- 
+2.54.0 (Apple Git-157)
+

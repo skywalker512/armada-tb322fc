@@ -1,0 +1,44 @@
+From 69dacec4ff4bffb8c0efa8fbc7584f86753e5dc1 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Sun, 27 Sep 2026 15:33:22 +0800
+Subject: [PATCH 02/48] clk: qcom: gdsc: pair the GX "do nothing" enable with a
+ matching disable
+
+gdsc_init() installs gdsc_disable() as power_off unless one was already
+set, so a GX GDSC using gdsc_gx_do_nothing_enable() - whose GDSC is
+hardware-controlled and must not be switched by the kernel - still got the
+plain disable as its power_off. genpd then tried to switch a domain that
+has to be left alone, which aborts the power-off of its consumers; seen
+during s2idle suspend of the USB block on the Lenovo Legion Y700 Gen4
+(SM8750).
+
+Add gdsc_gx_do_nothing_disable(), which only drops the parent supply when
+that supply is managed through the regulator framework, and install it
+automatically whenever power_on is gdsc_gx_do_nothing_enable(). Use it for
+the Kaanapali gx_clkctl GDSC.
+---
+ drivers/clk/qcom/gdsc.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/clk/qcom/gdsc.c b/drivers/clk/qcom/gdsc.c
+index b99d70149..0a8c335c1 100644
+--- a/drivers/clk/qcom/gdsc.c
++++ b/drivers/clk/qcom/gdsc.c
+@@ -513,8 +513,12 @@ static int gdsc_init(struct gdsc *sc)
+ 
+ 	if (sc->flags & ALWAYS_ON)
+ 		sc->pd.flags |= GENPD_FLAG_ALWAYS_ON;
+-	if (!sc->pd.power_off)
+-		sc->pd.power_off = gdsc_disable;
++	if (!sc->pd.power_off) {
++		if (sc->pd.power_on == gdsc_gx_do_nothing_enable)
++			sc->pd.power_off = gdsc_gx_disable;
++		else
++			sc->pd.power_off = gdsc_disable;
++	}
+ 	if (!sc->pd.power_on)
+ 		sc->pd.power_on = gdsc_enable;
+ 	if (sc->flags & HW_CTRL_TRIGGER) {
+-- 
+2.54.0 (Apple Git-157)
+

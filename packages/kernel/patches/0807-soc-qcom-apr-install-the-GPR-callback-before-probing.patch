@@ -1,0 +1,51 @@
+From 36391cac67477a7ccbd96f25bb17fcc1aba8d2a6 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 16:11:09 +0800
+Subject: [PATCH 05/48] soc: qcom: apr: install the GPR callback before probing
+ the service
+
+apr_device_probe() assigned adev->svc.callback only after the driver's
+probe returned. A driver may issue a synchronous request from its own
+probe - q6apm asks the DSP for the SPF state - and the reply can arrive
+while probe is still running. gpr_do_rx_callback() drops packets for a
+service with no callback, so setting it afterwards loses that reply and
+the request always times out.
+
+Set the callback before probing.
+
+Imported from BigfootACA/linux full-v7.1.3 (fdb8767545), the Xiaomi Pad 8
+Pro (xiaomi-piano, SM8750) mainline tree. Original author: Junhao Xie
+<bigfoot@radxa.com>.
+---
+ drivers/soc/qcom/apr.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/soc/qcom/apr.c b/drivers/soc/qcom/apr.c
+index ea7f83916..8fe72daa2 100644
+--- a/drivers/soc/qcom/apr.c
++++ b/drivers/soc/qcom/apr.c
+@@ -367,9 +367,19 @@ static int apr_device_probe(struct device *dev)
+ 	struct apr_driver *adrv = to_apr_driver(dev->driver);
+ 	int ret;
+ 
++	/*
++	 * Install the response callback before probing. A driver may issue a
++	 * synchronous request from its own probe - q6apm asks the DSP for the
++	 * SPF state - and the reply can arrive while probe is still running.
++	 * gpr_do_rx_callback() drops packets for a service with no callback,
++	 * so setting it afterwards loses that reply and the request always
++	 * times out, no matter how long it waits.
++	 */
++	adev->svc.callback = adrv->gpr_callback;
++
+ 	ret = adrv->probe(adev);
+-	if (!ret)
+-		adev->svc.callback = adrv->gpr_callback;
++	if (ret)
++		adev->svc.callback = NULL;
+ 
+ 	return ret;
+ }
+-- 
+2.54.0 (Apple Git-157)
+

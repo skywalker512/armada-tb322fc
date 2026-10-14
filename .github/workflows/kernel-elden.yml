@@ -1,0 +1,70 @@
+---
+name: kernel-elden
+
+# Builds the common kernel package the way a developer does locally
+# (build-local.sh -> podman -> packages/kernel/build.sh) and asserts the
+# elden board DTB made it into the staged tarball.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'packages/kernel/**'
+      - 'system_files/usr/lib/armada/supported-dtbs'
+      - '.github/workflows/kernel-elden.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: kernel (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install podman
+        run: |
+          set -euxo pipefail
+          need=(podman zstd)
+          # Runner crun mismatches podman ("crun: unknown version specified").
+          command -v runc >/dev/null || need+=(runc)
+          sudo apt-get update
+          sudo apt-get install -y "${need[@]}"
+          mkdir -p ~/.config/containers
+          printf '[engine]\nruntime = "runc"\n' > ~/.config/containers/containers.conf
+
+      - name: ccache
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4.2.3
+        with:
+          path: packages/kernel/.ccache
+          key: ccache-kernel-local-${{ runner.arch }}-${{ hashFiles('packages/kernel/patches/series', 'packages/kernel/BASE.env') }}-${{ hashFiles('packages/kernel/config/armada-kernel.config.overrides', 'packages/kernel/dts/**') }}
+          restore-keys: |
+            ccache-kernel-local-${{ runner.arch }}-${{ hashFiles('packages/kernel/patches/series', 'packages/kernel/BASE.env') }}-
+
+      - name: Build kernel package
+        run: |
+          set -o pipefail
+          ./packages/build-local.sh kernel 2>&1 | tee kernel-build.log
+
+      - name: Verify elden DTB in the tarball
+        run: |
+          set -euxo pipefail
+          tb="$(find packages/kernel/out -name 'armada-kernel-*.tar.zst' -print -quit)"
+          test -n "${tb}"
+          echo "tarball: ${tb}"
+          tar --zstd -tf "${tb}" | tee tarball.list
+          grep -x 'lib/modules/.*/dtb/qcom/sm8750-lenovo-elden.dtb' tarball.list
+          grep -c 'dtb/qcom/.*\.dtb' tarball.list
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-elden-${{ github.sha }}
+          path: |
+            packages/kernel/out/
+            kernel-build.log
+            tarball.list
+          if-no-files-found: warn

@@ -1,0 +1,30 @@
+From 2fba481b46b47f326f071181cd2c52e990e4f0a4 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Sun, 11 Oct 2026 14:26:26 +0800
+Subject: [PATCH 33/48] drm/msm/dpu: sm8750: add the missing DSI GC (gamma)
+ sub-block
+
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c
+index 5dabb1655..3c006f04c 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.c
+@@ -428,6 +428,12 @@ static const struct dpu_lm_sub_blks sdm845_lm_sblk = {
+ 	},
+ };
+ 
++	/* GC 块偏移与 SM8650/SDM845 同（0x17c0）；上游 sm8750 目录里漏了，
++	 * 补上后 CRTC 才会暴露 GAMMA_LUT → Night Light / 色温可用。
++	 * 见 dpu_crtc.c: if (dspp->sblk->gc.base) drm_crtc_enable_color_mgmt(...).
++	 */
++	.gc = {.name = "gc", .base = 0x17c0,
++		.len = 0x40, .version = 0x10008},
+ static const struct dpu_lm_sub_blks sc7180_lm_sblk = {
+ 	.maxblendstages = 7, /* excluding base layer */
+ 	.blendstage_base = { /* offsets relative to mixer base */
+-- 
+2.54.0 (Apple Git-157)
+

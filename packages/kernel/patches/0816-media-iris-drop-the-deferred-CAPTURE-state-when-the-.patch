@@ -1,0 +1,58 @@
+From 06d8be13d69c56960751627fea6c93dc462a61a0 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Wed, 7 Oct 2026 20:52:54 +0800
+Subject: [PATCH 14/48] media: iris: drop the deferred CAPTURE state when the
+ queue is torn down
+
+A client that STREAMONs the CAPTURE queue before the first source change
+gets its CAPTURE-port bring-up deferred (iris_vdec_streamon_output()), so
+the firmware never sees that port.  If it then tears the queue down
+without ever issuing V4L2_DEC_CMD_START, iris_session_streamoff() still
+sends the HFI session_stop for a port that was never started: the
+firmware rejects it and iris_kill_session() takes the whole instance
+down, and iris_inst_state_change_streamoff() finds no transition from
+IRIS_INST_INPUT_STREAMING and forces IRIS_INST_ERROR.
+
+Recognise that case, clear defer_capture_streamon and hand the deferred
+buffers back, instead of stopping a port that was never brought up.
+
+Verified on-device with a new early-teardown case in iris_mode_test (it
+STREAMOFFs CAPTURE before the source change, which the existing modes did
+not cover): the teardown now returns cleanly with no iris/videobuf2
+errors, and 70/70 normal decodes, 15/15 early-start and 15/15
+early-teardown still pass with Slab/SUnreclaim flat.
+---
+ drivers/media/platform/qcom/iris/iris_common.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_common.c b/drivers/media/platform/qcom/iris/iris_common.c
+index 25836561b..5e14c6d4a 100644
+--- a/drivers/media/platform/qcom/iris/iris_common.c
++++ b/drivers/media/platform/qcom/iris/iris_common.c
+@@ -215,6 +215,23 @@ int iris_session_streamoff(struct iris_inst *inst, u32 plane)
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * The client streamed CAPTURE before the initial source change, so
++	 * iris_vdec_streamon_output() deferred the CAPTURE-port bring-up and the
++	 * firmware never saw that port.  If the client now tears the queue down,
++	 * there is no port to stop: issuing the HFI STOP would fail and
++	 * iris_kill_session() would take the whole instance down, and
++	 * iris_inst_state_change_streamoff() would find no matching transition
++	 * (the state is still INPUT_STREAMING) and force IRIS_INST_ERROR.
++	 * Drop the deferred state and hand the buffers back instead -- the
++	 * instance stays "OUTPUT streaming", which is what it really is.
++	 */
++	if (buffer_type == BUF_OUTPUT && inst->defer_capture_streamon) {
++		inst->defer_capture_streamon = false;
++		iris_flush_deferred_buffers(inst, buffer_type);
++		return 0;
++	}
++
+ 	ret = hfi_ops->session_stop(inst, plane);
+ 	if (ret)
+ 		goto error;
+-- 
+2.54.0 (Apple Git-157)
+

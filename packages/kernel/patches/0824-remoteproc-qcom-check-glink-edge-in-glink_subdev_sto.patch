@@ -1,0 +1,37 @@
+From 6fe73239b158cc88cd43b93a5f30f1ca10e00c07 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Sat, 10 Oct 2026 23:54:11 +0800
+Subject: [PATCH 22/48] remoteproc: qcom: check glink->edge in
+ glink_subdev_stop()
+
+For a remoteproc that is doing attach, glink_subdev_start() is only called
+once attach has succeeded. If rproc_report_crash() is called from the
+attach function, rproc_boot_recovery()->rproc_stop()->glink_subdev_stop()
+can run with glink->edge still NULL, causing a NULL pointer dereference in
+qcom_glink_smem_unregister().
+
+Bail out early when glink->edge is NULL so qcom_glink_smem_unregister()
+is not called if glink_subdev_start() was never called.
+
+Ported from BigfootACA/linux cd72cede17.
+---
+ drivers/remoteproc/qcom_common.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/remoteproc/qcom_common.c b/drivers/remoteproc/qcom_common.c
+index 5294e327f..3449aa75e 100644
+--- a/drivers/remoteproc/qcom_common.c
++++ b/drivers/remoteproc/qcom_common.c
+@@ -226,6 +226,9 @@ static void glink_subdev_stop(struct rproc_subdev *subdev, bool crashed)
+ {
+ 	struct qcom_rproc_glink *glink = to_glink_subdev(subdev);
+ 
++	if (!glink->edge)
++		return;
++
+ 	qcom_glink_smem_unregister(glink->edge);
+ 	glink->edge = NULL;
+ }
+-- 
+2.54.0 (Apple Git-157)
+

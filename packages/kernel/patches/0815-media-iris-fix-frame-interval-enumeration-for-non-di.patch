@@ -1,0 +1,45 @@
+From 129fffd207ad2593fefa56e015bf030e7c27f8e2 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 17:00:25 +0800
+Subject: [PATCH 13/48] media: iris: fix frame interval enumeration for
+ non-divisor framerates
+
+iris_enum_frameintervals() advertised V4L2_FRMIVAL_TYPE_STEPWISE with
+step = 1/MAXIMUM_FPS (480), which restricts clients to framerates of the form
+480/n - i.e. only exact divisors of 480 (480, 240, 160, 120, 96, 80, 60, 30,
+24, 1). Framerates like 25 and 29 fps were excluded even though there is no
+hardware restriction, and GStreamer caps negotiation failed with "internal
+data stream error" when encoding them.
+
+Use V4L2_FRMIVAL_TYPE_CONTINUOUS with step 1/1 instead.
+
+Cherry-picked via BigfootACA/linux full-v7.1.3 (665f95900e), the Xiaomi Pad 8
+Pro (xiaomi-piano, SM8750) mainline tree.
+---
+ drivers/media/platform/qcom/iris/iris_vidc.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_vidc.c b/drivers/media/platform/qcom/iris/iris_vidc.c
+index 70605b870..e2d4dab27 100644
+--- a/drivers/media/platform/qcom/iris/iris_vidc.c
++++ b/drivers/media/platform/qcom/iris/iris_vidc.c
+@@ -438,14 +438,14 @@ static int iris_enum_frameintervals(struct file *filp, void *fh,
+ 	mbpf = NUM_MBS_PER_FRAME(fival->height, fival->width);
+ 	fps = DIV_ROUND_UP(core->iris_platform_data->max_core_mbps, mbpf);
+ 
+-	fival->type = V4L2_FRMIVAL_TYPE_STEPWISE;
++	fival->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
+ 	fival->stepwise.min.numerator = 1;
+ 	fival->stepwise.min.denominator =
+ 			min_t(u32, fps, MAXIMUM_FPS);
+ 	fival->stepwise.max.numerator = 1;
+ 	fival->stepwise.max.denominator = 1;
+ 	fival->stepwise.step.numerator = 1;
+-	fival->stepwise.step.denominator = MAXIMUM_FPS;
++	fival->stepwise.step.denominator = 1;
+ 
+ 	return 0;
+ }
+-- 
+2.54.0 (Apple Git-157)
+

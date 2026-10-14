@@ -1,0 +1,725 @@
+From bd5c3798289d1d6aa2a4c9bebbabcbf916d604b5 Mon Sep 17 00:00:00 2001
+From: GEEKiDoS <geek_ds@foxmail.com>
+Date: Wed, 14 Oct 2026 20:46:14 +0800
+Subject: [PATCH 36/48] elden: arm64/clk: sm8750 platform plumbing for Y700
+ Gen4
+
+split from h0cheung/tb322fc-linux-kernel 0001 arm64: qcom: add Lenovo
+Legion Tab Y700 Gen4 support; folds in 0067 (q6apm/q6prm GPR source
+port from DT) for the sm8750.dtsi service@3/@7 nodes
+---
+ arch/arm64/boot/dts/qcom/sm8750.dtsi          |  330 ++-
+ drivers/clk/clk.c                             |   69 +-
+ drivers/clk/qcom/dispcc-sm8750.c              |    4 +-
+ drivers/clk/qcom/gcc-sm8750.c                 |    3 +
+ drivers/clk/qcom/gdsc.c                       |   19 +
+ drivers/clk/qcom/gdsc.h                       |    2 +
+ 7 files changed, 2867 insertions(+), 31 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8750.dtsi b/arch/arm64/boot/dts/qcom/sm8750.dtsi
+index b82a16652..68ace5fd4 100644
+--- a/arch/arm64/boot/dts/qcom/sm8750.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8750.dtsi
+@@ -688,6 +688,9 @@ gcc: clock-controller@100000 {
+ 			compatible = "qcom,sm8750-gcc";
+ 			reg = <0x0 0x00100000 0x0 0x1f4200>;
+ 
++			power-domains = <&rpmhpd RPMHPD_CX>,
++					<&rpmhpd RPMHPD_MX>;
++
+ 			clocks = <&bi_tcxo_div2>,
+ 				 <0>,
+ 				 <&sleep_clk>,
+@@ -2368,9 +2371,16 @@ gpr {
+ 					#address-cells = <1>;
+ 					#size-cells = <0>;
+ 
+-					q6apm: service@1 {
++					/*
++					 * The SM8750 ADSP firmware only answers the downstream
++					 * static GPR client ports (APM 3, PRM 7) and silently
++					 * drops requests from any other source port, so the
++					 * q6apm/q6prm drivers take their GPR source port from
++					 * this "reg".
++					 */
++					q6apm: service@3 {
+ 						compatible = "qcom,q6apm";
+-						reg = <GPR_APM_MODULE_IID>;
++						reg = <3>;
+ 						#sound-dai-cells = <0>;
+ 						qcom,protection-domain = "avs/audio",
+ 									 "msm/adsp/audio_pd";
+@@ -2387,9 +2397,9 @@ q6apmdai: dais {
+ 						};
+ 					};
+ 
+-					q6prm: service@2 {
++					q6prm: service@7 {
+ 						compatible = "qcom,q6prm";
+-						reg = <GPR_PRM_MODULE_IID>;
++						reg = <7>;
+ 						qcom,protection-domain = "avs/audio",
+ 									 "msm/adsp/audio_pd";
+ 
+@@ -2936,6 +2946,7 @@ &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
+ 
+ 			dma-coherent;
+ 			usb-role-switch;
++			wakeup-source;
+ 
+ 			status = "disabled";
+ 
+@@ -3080,6 +3091,245 @@ videocc: clock-controller@aaf0000 {
+ 			#power-domain-cells = <1>;
+ 		};
+ 
++		cci0: cci@ac7b000 {
++			compatible = "qcom,sm8750-cci", "qcom,msm8996-cci";
++			reg = <0x0 0x0ac7b000 0x0 0x1000>;
++			interrupts = <GIC_SPI 426 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
++			clocks = <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_0_CLK>;
++			clock-names = "ahb", "cci";
++			assigned-clocks = <&camcc CAM_CC_CCI_0_CLK>;
++			assigned-clock-rates = <37500000>;
++			status = "disabled";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			cci0_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci0_i2c1: i2c-bus@1 {
++				status = "disabled";
++				reg = <1>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		cci1: cci@ac7c000 {
++			compatible = "qcom,sm8750-cci", "qcom,msm8996-cci";
++			reg = <0x0 0x0ac7c000 0x0 0x1000>;
++			interrupts = <GIC_SPI 427 IRQ_TYPE_EDGE_RISING>;
++			power-domains = <&camcc CAM_CC_TITAN_TOP_GDSC>;
++			clocks = <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CCI_1_CLK>;
++			clock-names = "ahb", "cci";
++			assigned-clocks = <&camcc CAM_CC_CCI_1_CLK>;
++			assigned-clock-rates = <37500000>;
++			status = "disabled";
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			cci1_i2c0: i2c-bus@0 {
++				reg = <0>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++
++			cci1_i2c1: i2c-bus@1 {
++				status = "disabled";
++				reg = <1>;
++				clock-frequency = <400000>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
++		camss: isp@ad27000 {
++			compatible = "qcom,sm8750-camss";
++
++			reg = <0x0 0x0ad27000 0x0 0x2b00>,
++			      <0x0 0x0ad2a000 0x0 0x2b00>,
++			      <0x0 0x0ad2d000 0x0 0x2b00>,
++			      <0x0 0x0ad6d000 0x0 0xa00>,
++			      <0x0 0x0ad72000 0x0 0xa00>,
++			      <0x0 0x0ada9000 0x0 0x2000>,
++			      <0x0 0x0adab000 0x0 0x2000>,
++			      <0x0 0x0adad000 0x0 0x2000>,
++			      <0x0 0x0adaf000 0x0 0x2000>,
++			      <0x0 0x0adb1000 0x0 0x2000>,
++			      <0x0 0x0adb3000 0x0 0x2000>,
++			      <0x0 0x0ad8b000 0x0 0x400>,
++			      <0x0 0x0ad8c000 0x0 0x400>,
++			      <0x0 0x0ad8d000 0x0 0x400>,
++			      <0x0 0x0ac86000 0x0 0x10000>,
++			      <0x0 0x0ac96000 0x0 0x10000>,
++			      <0x0 0x0aca6000 0x0 0x10000>,
++			      <0x0 0x0ad6e000 0x0 0x3000>,
++			      <0x0 0x0ad73000 0x0 0x3000>;
++			reg-names = "csid0",
++				    "csid1",
++				    "csid2",
++				    "csid_lite0",
++				    "csid_lite1",
++				    "csiphy0",
++				    "csiphy1",
++				    "csiphy2",
++				    "csiphy3",
++				    "csiphy4",
++				    "csiphy5",
++				    "csitpg0",
++				    "csitpg1",
++				    "csitpg2",
++				    "vfe0",
++				    "vfe1",
++				    "vfe2",
++				    "vfe_lite0",
++				    "vfe_lite1";
++
++			clocks = <&camcc CAM_CC_CAMNOC_NRT_AXI_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_AXI_CLK>,
++				 <&camcc CAM_CC_CAM_TOP_AHB_CLK>,
++				 <&camcc CAM_CC_CAM_TOP_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_TFE_0_MAIN_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_TFE_1_MAIN_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_TFE_2_MAIN_CLK>,
++				 <&camcc CAM_CC_CAMNOC_RT_IFE_LITE_CLK>,
++				 <&camcc CAM_CC_CSID_CLK>,
++				 <&camcc CAM_CC_CSID_CSIPHY_RX_CLK>,
++				 <&camcc CAM_CC_CSIPHY0_CLK>,
++				 <&camcc CAM_CC_CSI0PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY1_CLK>,
++				 <&camcc CAM_CC_CSI1PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY2_CLK>,
++				 <&camcc CAM_CC_CSI2PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY3_CLK>,
++				 <&camcc CAM_CC_CSI3PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY4_CLK>,
++				 <&camcc CAM_CC_CSI4PHYTIMER_CLK>,
++				 <&camcc CAM_CC_CSIPHY5_CLK>,
++				 <&camcc CAM_CC_CSI5PHYTIMER_CLK>,
++				 <&gcc GCC_CAMERA_HF_AXI_CLK>,
++				 <&gcc GCC_CAMERA_SF_AXI_CLK>,
++				 <&camcc CAM_CC_TFE_0_MAIN_CLK>,
++				 <&camcc CAM_CC_TFE_0_MAIN_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_TFE_1_MAIN_CLK>,
++				 <&camcc CAM_CC_TFE_1_MAIN_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_TFE_2_MAIN_CLK>,
++				 <&camcc CAM_CC_TFE_2_MAIN_FAST_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_AHB_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CPHY_RX_CLK>,
++				 <&camcc CAM_CC_IFE_LITE_CSID_CLK>,
++				 <&camcc CAM_CC_QDSS_DEBUG_XO_CLK>;
++			clock-names = "camnoc_nrt_axi",
++				      "camnoc_rt_axi",
++				      "cpas_ahb",
++				      "cpas_fast_ahb",
++				      "cpas_vfe0",
++				      "cpas_vfe1",
++				      "cpas_vfe2",
++				      "cpas_vfe_lite",
++				      "csid",
++				      "csid_csiphy_rx",
++				      "csiphy0",
++				      "csiphy0_timer",
++				      "csiphy1",
++				      "csiphy1_timer",
++				      "csiphy2",
++				      "csiphy2_timer",
++				      "csiphy3",
++				      "csiphy3_timer",
++				      "csiphy4",
++				      "csiphy4_timer",
++				      "csiphy5",
++				      "csiphy5_timer",
++				      "gcc_axi_hf",
++				      "gcc_axi_sf",
++				      "vfe0",
++				      "vfe0_fast_ahb",
++				      "vfe1",
++				      "vfe1_fast_ahb",
++				      "vfe2",
++				      "vfe2_fast_ahb",
++				      "vfe_lite",
++				      "vfe_lite_ahb",
++				      "vfe_lite_cphy_rx",
++				      "vfe_lite_csid",
++				      "qdss_debug_xo";
++
++			interrupts = <GIC_SPI 601 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 603 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 431 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 605 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 376 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 477 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 478 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 479 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 448 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 122 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 89 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 433 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 436 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 457 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 606 IRQ_TYPE_EDGE_RISING>,
++				     <GIC_SPI 377 IRQ_TYPE_EDGE_RISING>;
++			interrupt-names = "csid0",
++					  "csid1",
++					  "csid2",
++					  "csid_lite0",
++					  "csid_lite1",
++					  "csiphy0",
++					  "csiphy1",
++					  "csiphy2",
++					  "csiphy3",
++					  "csiphy4",
++					  "csiphy5",
++					  "vfe0",
++					  "vfe1",
++					  "vfe2",
++					  "vfe_lite0",
++					  "vfe_lite1";
++
++			interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++					 &config_noc SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
++					<&mmss_noc MASTER_CAMNOC_HF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++					<&mmss_noc MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
++					<&mmss_noc MASTER_CAMNOC_NRT_ICP_SF QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
++			interconnect-names = "ahb",
++					     "hf_mnoc",
++					     "sf_mnoc",
++					     "sf_icp_mnoc";
++
++			iommus = <&apps_smmu 0x1c00 0x00>;
++
++			power-domains = <&camcc CAM_CC_TFE_0_GDSC>,
++					<&camcc CAM_CC_TFE_1_GDSC>,
++					<&camcc CAM_CC_TFE_2_GDSC>,
++					<&camcc CAM_CC_TITAN_TOP_GDSC>;
++			power-domain-names = "ife0",
++					     "ife1",
++					     "ife2",
++					     "top";
++
++			dma-coherent;
++			status = "disabled";
++
++			ports {
++				#address-cells = <1>;
++				#size-cells = <0>;
++			};
++		};
++
+ 		mdss: display-subsystem@ae00000 {
+ 			compatible = "qcom,sm8750-mdss";
+ 			reg = <0x0 0x0ae00000 0x0 0x1000>;
+@@ -3116,7 +3366,7 @@ &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>,
+ 			mdss_mdp: display-controller@ae01000 {
+ 				compatible = "qcom,sm8750-dpu";
+ 				reg = <0x0 0x0ae01000 0x0 0x93000>,
+-				      <0x0 0x0aeb0000 0x0 0x2008>,
++				      <0x0 0x0aeb0000 0x0 0x3000>,
+ 				      <0x0 0x0af80000 0x0 0x7000>;
+ 				reg-names = "mdp",
+ 					    "vbif",
+@@ -3546,6 +3796,9 @@ gpu: gpu@3d00000 {
+ 
+ 			operating-points-v2 = <&gpu_opp_table>;
+ 
++			nvmem-cells = <&gpu_speed_bin>;
++			nvmem-cell-names = "speed_bin";
++
+ 			qcom,gmu = <&gmu>;
+ 			#cooling-cells = <2>;
+ 
+@@ -3556,6 +3809,7 @@ gpu: gpu@3d00000 {
+ 			status = "disabled";
+ 
+ 			gpu_zap_shader: zap-shader {
++				firmware-name = "qcom/sm8750/gen80000_zap.mbn";
+ 				memory-region = <&gpu_micro_code_mem>;
+ 			};
+ 
+@@ -3566,56 +3820,64 @@ gpu_opp_table: opp-table {
+ 				opp-1100000000 {
+ 					opp-hz = /bits/ 64 <1100000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L3>;
+-					opp-peak-kBps = <20832031>;
+-					qcom,opp-acd-level = <0x882a5ffd>;
++					opp-peak-kBps = <18597656>;
++					opp-supported-hw = <0xc>;
++					qcom,opp-acd-level = <0x88295ffd>;
+ 				};
+ 
+ 				opp-1050000000 {
+ 					opp-hz = /bits/ 64 <1050000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L1>;
+-					opp-peak-kBps = <20832031>;
+-					qcom,opp-acd-level = <0x882a5ffd>;
++					opp-peak-kBps = <18597656>;
++					opp-supported-hw = <0xe>;
++					qcom,opp-acd-level = <0xa8295ffd>;
+ 				};
+ 
+ 				opp-967000000 {
+ 					opp-hz = /bits/ 64 <967000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
+-					opp-peak-kBps = <12449218>;
+-					qcom,opp-acd-level = <0x882b5ffd>;
++					opp-peak-kBps = <18597656>;
++					opp-supported-hw = <0xe>;
++					qcom,opp-acd-level = <0x882a5ffd>;
+ 				};
+ 
+ 				opp-900000000 {
+ 					opp-hz = /bits/ 64 <900000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
+-					opp-peak-kBps = <12449218>;
+-					qcom,opp-acd-level = <0x882b5ffd>;
++					opp-peak-kBps = <16500000>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0x882a5ffd>;
+ 				};
+ 
+ 				opp-832000000 {
+ 					opp-hz = /bits/ 64 <832000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L2>;
+-					opp-peak-kBps = <12449218>;
+-					qcom,opp-acd-level = <0x882b5ffd>;
++					opp-peak-kBps = <16500000>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0x882a5ffd>;
+ 				};
+ 
+ 				opp-734000000 {
+ 					opp-hz = /bits/ 64 <734000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
+-					opp-peak-kBps = <8171875>;
+-					qcom,opp-acd-level = <0xa82b5ffd>;
++					opp-peak-kBps = <12449218>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0xa82a5ffd>;
+ 				};
+ 
+ 				opp-660000000 {
+ 					opp-hz = /bits/ 64 <660000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L0>;
+ 					opp-peak-kBps = <8171875>;
+-					qcom,opp-acd-level = <0x882d5ffd>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0x882c5ffd>;
+ 				};
+ 
+ 				opp-607000000 {
+ 					opp-hz = /bits/ 64 <607000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
+-					opp-peak-kBps = <6074218>;
++					opp-peak-kBps = <8171875>;
++					opp-supported-hw = <0xf>;
+ 					qcom,opp-acd-level = <0xa82e5ffd>;
+ 				};
+ 
+@@ -3623,39 +3885,45 @@ opp-525000000 {
+ 					opp-hz = /bits/ 64 <525000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_L1>;
+ 					opp-peak-kBps = <6074218>;
+-					qcom,opp-acd-level = <0xc0285ffd>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0xc02e5ffd>;
+ 				};
+ 
+ 				opp-443000000 {
+ 					opp-hz = /bits/ 64 <443000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
+ 					opp-peak-kBps = <6074218>;
+-					qcom,opp-acd-level = <0xe02d5ffd>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0xc02e5ffd>;
+ 				};
+ 
+ 				opp-389000000 {
+ 					opp-hz = /bits/ 64 <389000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D0>;
+-					opp-peak-kBps = <5285156>;
+-					qcom,opp-acd-level = <0xe02f5ffd>;
++					opp-peak-kBps = <6074218>;
++					opp-supported-hw = <0xf>;
++					qcom,opp-acd-level = <0xc8285ffd>;
+ 				};
+ 
+ 				opp-342000000 {
+ 					opp-hz = /bits/ 64 <342000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D1>;
+ 					opp-peak-kBps = <5285156>;
++					opp-supported-hw = <0xf>;
+ 				};
+ 
+ 				opp-222000000 {
+ 					opp-hz = /bits/ 64 <222000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D2>;
+ 					opp-peak-kBps = <2136718>;
++					opp-supported-hw = <0xf>;
+ 				};
+ 
+ 				opp-160000000 {
+ 					opp-hz = /bits/ 64 <160000000>;
+ 					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D3>;
+ 					opp-peak-kBps = <2136718>;
++					opp-supported-hw = <0xf>;
+ 				};
+ 			};
+ 		};
+@@ -3707,7 +3975,7 @@ opp-650000000 {
+ 
+ 				opp-687500000 {
+ 					opp-hz = /bits/ 64 <687500000>;
+-					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
++					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
+ 				};
+ 			};
+ 		};
+@@ -6026,6 +6294,18 @@ cpu_scp_lpri1: scp-sram-section@200 {
+ 			};
+ 		};
+ 
++		qfprom: efuse@221c8000 {
++			compatible = "qcom,sm8750-qfprom", "qcom,qfprom";
++			reg = <0x0 0x221c8000 0x0 0x1000>;
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			gpu_speed_bin: gpu-speed-bin@138 {
++				reg = <0x138 0x2>;
++				bits = <0 9>;
++			};
++		};
++
+ 		/* cluster0 */
+ 		pmu@240b3400 {
+ 			compatible = "qcom,sm8750-cpu-bwmon", "qcom,sdm845-bwmon";
+@@ -6100,6 +6380,8 @@ pmu@240b7400 {
+ 					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>;
+ 
+ 			operating-points-v2 = <&cpu_bwmon_opp_table>;
++
++			nonposted-mmio;
+ 		};
+ 
+ 		gem_noc: interconnect@24100000 {
+diff --git a/drivers/clk/clk.c b/drivers/clk/clk.c
+index 048adfa86..5dc15ced7 100644
+--- a/drivers/clk/clk.c
++++ b/drivers/clk/clk.c
+@@ -64,6 +64,7 @@ struct clk_parent_map {
+ };
+ 
+ struct clk_core {
++	bool orphan_reparent_failed;
+ 	const char		*name;
+ 	const struct clk_ops	*ops;
+ 	struct clk_hw		*hw;
+@@ -3826,6 +3827,55 @@ static inline void clk_debug_unregister(struct clk_core *core)
+ }
+ #endif
+ 
++static int clk_core_reparent_orphan_nolock(struct clk_core *orphan,
++					   struct clk_core *parent)
++{
++	bool parent_ops_enabled = false;
++	bool parent_migration_enabled = false;
++	bool core_migration_enabled = false;
++	unsigned long flags;
++	int ret;
++
++	if (orphan->flags & CLK_OPS_PARENT_ENABLE) {
++		ret = clk_core_prepare_enable(parent);
++		if (ret)
++			return ret;
++		parent_ops_enabled = true;
++	}
++
++	if (orphan->prepare_count) {
++		ret = clk_core_prepare_enable(parent);
++		if (ret)
++			goto err_disable_ops_parent;
++		parent_migration_enabled = true;
++
++		ret = clk_core_enable_lock(orphan);
++		if (ret)
++			goto err_disable_migration_parent;
++		core_migration_enabled = true;
++	}
++
++	flags = clk_enable_lock();
++	clk_reparent(orphan, parent);
++	clk_enable_unlock(flags);
++
++	if (core_migration_enabled)
++		clk_core_disable_lock(orphan);
++	if (parent_ops_enabled)
++		clk_core_disable_unprepare(parent);
++
++	/* Keep the migration reference on the new parent. */
++	return 0;
++
++err_disable_migration_parent:
++	if (parent_migration_enabled)
++		clk_core_disable_unprepare(parent);
++err_disable_ops_parent:
++	if (parent_ops_enabled)
++		clk_core_disable_unprepare(parent);
++	return ret;
++}
++
+ static void clk_core_reparent_orphans_nolock(void)
+ {
+ 	struct clk_core *orphan;
+@@ -3839,15 +3889,24 @@ static void clk_core_reparent_orphans_nolock(void)
+ 		struct clk_core *parent = __clk_init_parent(orphan);
+ 
+ 		/*
+-		 * We need to use __clk_set_parent_before() and _after() to
+-		 * properly migrate any prepare/enable count of the orphan
++		 * We need to migrate any prepare/enable count of the orphan
+ 		 * clock. This is important for CLK_IS_CRITICAL clocks, which
+ 		 * are enabled during init but might not have a parent yet.
+ 		 */
+ 		if (parent) {
+-			/* update the clk tree topology */
+-			__clk_set_parent_before(orphan, parent);
+-			__clk_set_parent_after(orphan, parent, NULL);
++			int ret;
++
++			if (orphan->orphan_reparent_failed)
++				continue;
++
++			ret = clk_core_reparent_orphan_nolock(orphan, parent);
++			if (ret) {
++				orphan->orphan_reparent_failed = true;
++				pr_err_ratelimited("%s: orphan reparent failed: %d\n",
++						   orphan->name, ret);
++				continue;
++			}
++
+ 			__clk_recalc_accuracies(orphan);
+ 			__clk_recalc_rates(orphan, true, 0);
+ 
+diff --git a/drivers/clk/qcom/dispcc-sm8750.c b/drivers/clk/qcom/dispcc-sm8750.c
+index 18e86b80e..e1d9534c0 100644
+--- a/drivers/clk/qcom/dispcc-sm8750.c
++++ b/drivers/clk/qcom/dispcc-sm8750.c
+@@ -1759,7 +1759,7 @@ static struct gdsc mdss_gdsc = {
+ 		.name = "mdss_gdsc",
+ 	},
+ 	.pwrsts = PWRSTS_OFF_ON,
+-	.flags = POLL_CFG_GDSCR | HW_CTRL | RETAIN_FF_ENABLE,
++	.flags = POLL_CFG_GDSCR | HW_CTRL | RETAIN_FF_ENABLE | HW_CTRL_SKIP_DIS,
+ };
+ 
+ static struct gdsc mdss_int2_gdsc = {
+@@ -1771,7 +1771,7 @@ static struct gdsc mdss_int2_gdsc = {
+ 		.name = "mdss_int2_gdsc",
+ 	},
+ 	.pwrsts = PWRSTS_OFF_ON,
+-	.flags = POLL_CFG_GDSCR | HW_CTRL | RETAIN_FF_ENABLE,
++	.flags = POLL_CFG_GDSCR | HW_CTRL | RETAIN_FF_ENABLE | HW_CTRL_SKIP_DIS,
+ };
+ 
+ static struct clk_regmap *disp_cc_sm8750_clocks[] = {
+diff --git a/drivers/clk/qcom/gcc-sm8750.c b/drivers/clk/qcom/gcc-sm8750.c
+index da77c9b8c..2446a575e 100644
+--- a/drivers/clk/qcom/gcc-sm8750.c
++++ b/drivers/clk/qcom/gcc-sm8750.c
+@@ -2889,6 +2889,7 @@ static struct gdsc gcc_pcie_0_gdsc = {
+ 	.collapse_mask = BIT(0),
+ 	.pd = {
+ 		.name = "gcc_pcie_0_gdsc",
++		.flags = GENPD_FLAG_ACTIVE_WAKEUP,
+ 	},
+ 	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE | VOTABLE,
+@@ -2903,6 +2904,7 @@ static struct gdsc gcc_pcie_0_phy_gdsc = {
+ 	.collapse_mask = BIT(2),
+ 	.pd = {
+ 		.name = "gcc_pcie_0_phy_gdsc",
++		.flags = GENPD_FLAG_ACTIVE_WAKEUP,
+ 	},
+ 	.pwrsts = PWRSTS_RET_ON,
+ 	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE | VOTABLE,
+@@ -3189,6 +3191,7 @@ static const struct regmap_config gcc_sm8750_regmap_config = {
+ };
+ 
+ static const struct qcom_cc_desc gcc_sm8750_desc = {
++	.use_rpm = true,
+ 	.config = &gcc_sm8750_regmap_config,
+ 	.clks = gcc_sm8750_clocks,
+ 	.num_clks = ARRAY_SIZE(gcc_sm8750_clocks),
+diff --git a/drivers/clk/qcom/gdsc.c b/drivers/clk/qcom/gdsc.c
+index 0a8c335c1..d0bebbdf1 100644
+--- a/drivers/clk/qcom/gdsc.c
++++ b/drivers/clk/qcom/gdsc.c
+@@ -147,6 +147,7 @@ static int gdsc_update_collapse_bit(struct gdsc *sc, bool val)
+ static int gdsc_toggle_logic(struct gdsc *sc, enum gdsc_status status,
+ 		bool wait)
+ {
++	u32 val;
+ 	int ret;
+ 
+ 	if (status == GDSC_ON && sc->rsupply) {
+@@ -161,6 +162,14 @@ static int gdsc_toggle_logic(struct gdsc *sc, enum gdsc_status status,
+ 			goto err_disable_supply;
+ 	}
+ 
++	if (status == GDSC_ON && sc->flags & HW_CTRL_SKIP_DIS) {
++		ret = regmap_read(sc->regmap, sc->gdscr, &val);
++		if (ret)
++			goto err_disable_icc;
++		if (val & HW_CONTROL_MASK)
++			return 0;
++	}
++
+ 	ret = gdsc_update_collapse_bit(sc, status == GDSC_OFF);
+ 
+ 	/* If disabling votable gdscs, don't poll on status */
+@@ -205,6 +214,9 @@ static int gdsc_toggle_logic(struct gdsc *sc, enum gdsc_status status,
+ 
+ 	return ret;
+ 
++err_disable_icc:
++	if (status == GDSC_ON)
++		icc_set_bw(sc->icc_path, 0, 0);
+ err_disable_supply:
+ 	if (status == GDSC_ON && sc->rsupply)
+ 		regulator_disable(sc->rsupply);
+@@ -350,6 +362,13 @@ static int gdsc_disable(struct generic_pm_domain *domain)
+ 
+ 	/* Turn off HW trigger mode if supported */
+ 	if (sc->flags & HW_CTRL) {
++		if (sc->flags & HW_CTRL_SKIP_DIS) {
++			ret = icc_set_bw(sc->icc_path, 0, 0);
++			if (ret)
++				return ret;
++			return sc->rsupply ? regulator_disable(sc->rsupply) : 0;
++		}
++
+ 		ret = gdsc_hwctrl(sc, false);
+ 		if (ret < 0)
+ 			return ret;
+diff --git a/drivers/clk/qcom/gdsc.h b/drivers/clk/qcom/gdsc.h
+index 2f9665b66..6e7f0a65f 100644
+--- a/drivers/clk/qcom/gdsc.h
++++ b/drivers/clk/qcom/gdsc.h
+@@ -69,6 +69,8 @@ struct gdsc {
+ #define RETAIN_FF_ENABLE	BIT(7)
+ #define NO_RET_PERIPH	BIT(8)
+ #define HW_CTRL_TRIGGER	BIT(9)
++/* Leave power gating to hardware when the software vote is released. */
++#define HW_CTRL_SKIP_DIS	BIT(10)
+ 	struct reset_controller_dev	*rcdev;
+ 	unsigned int			*resets;
+ 	unsigned int			reset_count;
+-- 
+2.54.0 (Apple Git-157)
+

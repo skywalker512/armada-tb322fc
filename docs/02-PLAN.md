@@ -62,7 +62,8 @@ bootc 镜像、游戏栈（Steam/FEX/Proton）、设备 overlay，以及保留 A
 
 ## 待决策 / 待验证
 
-- [ ] 内核基线 pin：`v7.2-elden` 具体 commit（h0cheung sources.json 里的 `09e22021`？）
+- [x] 内核基线 pin：h0cheung `v7.2.8-elden` 分支 `6f97250e`（Linux 7.2.8 之上 75 个 elden 提交；`v7.2-elden` 分支 tip `09e22021` 是较旧的 7.2 基线线）。
+      已并入 Armada 通用内核（7.2.6）为 `packages/kernel/patches/0803-0850` + `dts/sm8750-lenovo-elden.dts`。
 - [ ] h0cheung 与 xiaquwan1001 两条线的关系：是同组人的两份记录还是独立团队？
       前者概率大（时间点、术语一致性），需确认再决定跟踪谁。
 - [ ] 与 h0cheung/xiaquwan1001 沟通：ArmadaOS 层是否有合作空间（至少同步 pin）。
