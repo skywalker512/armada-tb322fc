@@ -29,10 +29,41 @@ STAR_CHART 菜单（中/英），按选择把控制权交给 Android payload 内
 - `/sys/firmware/fdt`、`/proc/iomem`、`/proc/config.gz`（root 后提取；testkey+EDL 免解锁路径见顶层 docs/01-STATUS.md）
 - `avbtool.py`（AOSP）
 
+## 已核对的移植面（详见 `elden-porting-notes.md`）
+
+- 按键：PMIC 路径已具备——VOL+ 在 `pm8550_gpios` pin6，VOL- 走 `pon_resin`，
+  POWER 走 pon；kShimC `keys.c`/`spmi.c` 基本通用。
+- 必改：`keys.c` 的 TLMM `Layouts[]` 加 `{"qcom,sm8750-tlmm", 216}`；
+  `gpio.c` 的 `kshim_dt_soc` 只有 8150/8250，PMIC 按键路径用不到可先不动。
+- ramoops 导出是 tb323fu 专属文件，elden 版需真机 `/proc/iomem` 后写。
+
+## 构建冒烟（2026-10-14 已验证）
+
+`fetch-kshim.sh` 拉取 pin 定源码 → `build_runtime.py` 用 `elden_defconfig`
+构建 **PASS**：`kShimC.bin` 精确 4 MiB、无未解析符号
+（sha256 `65792e8e…a0b6`，本机 macOS + aarch64-elf-gcc 16.2，
+经 `kshim-elden/patches/0002` env 工具链覆盖）。
+
+```sh
+devices/lenovo-tb322fc/boot/fetch-kshim.sh /tmp/kshim-elden
+cd /tmp/kshim-elden/source
+# Linux: 默认 /usr/bin/aarch64-linux-gnu-*；macOS/其他环境用 env 覆盖：
+KSHIM_CC=aarch64-elf-gcc KSHIM_OBJCOPY=aarch64-elf-objcopy KSHIM_NM=aarch64-elf-nm \
+  python3 tools/build_runtime.py --config configs/elden_defconfig --out out/runtime
+```
+
+依赖：`kconfiglib`（genconfig 需在 PATH）、cmake、ninja、aarch64 gcc。
+lib/CrDK、lib/picolibc、third_party/lvgl 子模块由脚本按 pin 还原；
+libfdt 上游已内置于 `lib/libfdt/`。
+
 ## 目录
 
-- `kshim-elden/elden_defconfig` — 设备 defconfig 草稿（基于 tb323fu_defconfig 修改点标注）
-- `star-chart-build/` — 构建骨架（沿用 freedom `star-chart-build` 约定，输入路径同其 README）
+- `fetch-kshim.sh` — pin 定源码 + 子模块 + elden overlay 的一键准备脚本
+- `kshim-elden/elden_defconfig` — 设备 defconfig（runtime 构建已验证）
+- `kshim-elden/patches/` — elden overlay 补丁：`0001` sm8750-tlmm(216) 按键布局、
+  `0002` KSHIM_CC/OBJCOPY/NM env 覆盖（本机/CI 验证用，上游默认值不变）
+- `elden-porting-notes.md` — 已核对硬数据（TLMM/按键/面板/PMIC/Wi-Fi）
+- `star-chart-build/` — payload 打包骨架（沿用 freedom `star-chart-build` 约定）
 - `quiet-thermal-no-gpu.dtsi` — elden 版温区 GPU 解绑片段（TODO：照 tb323fu 同名文件改 elden DT 节点名）
 
 ## 参考

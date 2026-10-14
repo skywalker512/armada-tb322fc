@@ -1,0 +1,45 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 23acc95..7af5a2c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -21,8 +21,16 @@ elseif(UNIX)
+ #    set(CMAKE_C_COMPILER "/usr/bin/aarch64-none-elf-gcc")
+ #    set(CMAKE_OBJCOPY "/usr/bin/aarch64-none-elf-objcopy")
+     set(TARGET_TOOLCHAIN_PREFIX "/usr/bin/aarch64-linux-gnu-")
+-    set(CMAKE_C_COMPILER "/usr/bin/aarch64-linux-gnu-gcc")
+-    set(CMAKE_OBJCOPY "/usr/bin/aarch64-linux-gnu-objcopy")
++    set(_KSHIM_CC "$ENV{KSHIM_CC}")
++    set(_KSHIM_OBJCOPY "$ENV{KSHIM_OBJCOPY}")
++    if ("${_KSHIM_CC}" STREQUAL "")
++        set(_KSHIM_CC "/usr/bin/aarch64-linux-gnu-gcc")
++    endif()
++    if ("${_KSHIM_OBJCOPY}" STREQUAL "")
++        set(_KSHIM_OBJCOPY "/usr/bin/aarch64-linux-gnu-objcopy")
++    endif()
++    set(CMAKE_C_COMPILER "${_KSHIM_CC}")
++    set(CMAKE_OBJCOPY "${_KSHIM_OBJCOPY}")
+ endif()
+ 
+ # If host system is linux and `tput colors` reports less than 256, switch to aquatic style.
+diff --git a/tools/build_runtime.py b/tools/build_runtime.py
+index 592094c..5b67a04 100644
+--- a/tools/build_runtime.py
++++ b/tools/build_runtime.py
+@@ -3,6 +3,7 @@
+ import argparse
+ import hashlib
+ import json
++import os
+ from pathlib import Path
+ import re
+ import subprocess
+@@ -31,7 +32,8 @@ def main():
+     binary = out / "kShimC.bin"
+     if binary.stat().st_size != 0x400000:
+         raise ValueError("Manifest runtime must occupy exactly 4 MiB")
+-    undefined = subprocess.check_output(["aarch64-linux-gnu-nm", "-u", out / "kShimC.elf"], text=True)
++    nm = os.environ.get("KSHIM_NM", "aarch64-linux-gnu-nm")
++    undefined = subprocess.check_output([nm, "-u", out / "kShimC.elf"], text=True)
+     if undefined.strip():
+         raise ValueError("Unresolved symbols: " + undefined)
+     report = {"profile": args.config.name, "mode": "manifest", "bytes": binary.stat().st_size,

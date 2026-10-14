@@ -34,6 +34,9 @@
 ## TODO
 
 - [ ] 真机取输入（见 `../README.md`）
-- [ ] `elden_defconfig` 落进 kShimC `configs/` 并跑 `build_runtime.py` 冒烟
+- [x] `elden_defconfig` + `../fetch-kshim.sh` + `../kshim-elden/patches/`
+      runtime 构建冒烟 **本机已 PASS**（4 MiB 精确、无未定义符号；
+      macOS aarch64-elf-gcc 经 0002 env 覆盖补丁）。
+      CI 冒烟同走 `.github/workflows/kshim-elden.yml`；跑通后回填 `KSHIM_COMMIT` sha
 - [ ] QEMU manifest 流程对 elden 复用（`tests/manifest_qemu.py`）
 - [ ] boot v4 重打包结构对 TB322FC boot.img 验证（`repack_boot_v4.py`）

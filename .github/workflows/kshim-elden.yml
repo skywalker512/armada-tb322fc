@@ -1,0 +1,34 @@
+name: kshim-elden
+
+on:
+  push:
+    paths:
+      - 'devices/lenovo-tb322fc/boot/**'
+      - '.github/workflows/kshim-elden.yml'
+  workflow_dispatch:
+
+jobs:
+  build-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu cmake ninja-build python3
+
+      - name: materialize kShimC workspace
+        run: devices/lenovo-tb322fc/boot/fetch-kshim.sh "$PWD/.work-kshim"
+
+      - name: build elden runtime (4 MiB manifest slot)
+        run: |
+          python3 .work-kshim/source/tools/build_runtime.py \
+            --config .work-kshim/source/configs/elden_defconfig \
+            --out "$PWD/.work-kshim/out/runtime" --jobs "$(nproc)"
+          cat "$PWD/.work-kshim/out/runtime/validation.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kShimC-elden-runtime
+          path: .work-kshim/out/runtime/

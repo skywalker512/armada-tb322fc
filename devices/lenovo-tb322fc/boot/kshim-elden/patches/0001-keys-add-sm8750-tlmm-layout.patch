@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Devin <devin@cognition.ai>
+Date: Wed, 14 Oct 2026 00:00:00 +0800
+Subject: [PATCH] dt/keys: accept qcom,sm8750-tlmm (216 GPIOs)
+
+sm8750 TLMM: compatible qcom,sm8750-tlmm, gpio-ranges <&tlmm 0 0 216>
+(mainline sm8750.dtsi). Needed only when gpio-keys reference TLMM pins;
+elden's own vol+/vol-/power ride the PMIC path (pm8550_gpios/pon_resin).
+
+CAUTION: the comment above this table warns other SoCs can be multi-tile;
+the linear base+gpio*0x1000+4 assumption for sm8750 must be validated on
+hardware before relying on any TLMM-referenced input.
+---
+ src/dt/keys.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/dt/keys.c b/src/dt/keys.c
+index 0000000..0000000 100644
+--- a/src/dt/keys.c
++++ b/src/dt/keys.c
+@@ -82,6 +82,7 @@ static uint32_t QcomFdtLinearTlmmGpioCount(const void *Blob, int Provider)
+   } Layouts[] = {
+       {"qcom,sm8450-tlmm", 210U},
+       {"qcom,sm8550-tlmm", 210U},
++      {"qcom,sm8750-tlmm", 216U},
+   };
+   size_t Index;
+ 
+-- 
+2.54.0
