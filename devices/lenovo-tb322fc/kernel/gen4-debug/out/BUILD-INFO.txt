@@ -1,0 +1,38 @@
+TB322FC gen4 debug boot image
+built_utc: 2026-10-16T13:57:35Z
+duration_sec: 1627
+nproc: 4
+
+pins:
+  umbrella: https://github.com/h0cheung/tb322fc-linux 234c49c274024ae53fd8ffca597954242dcd2b95
+  kernel: https://github.com/h0cheung/tb322fc-linux-kernel.git 6f97250ead155fc3b980856323e99a4623dae73d
+  kernel_write_tree: 12bc91648dd3e0f9425152cea8ed010502efec51
+  busybox: 1.36.1 b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+
+compilers:
+  clang: Ubuntu clang version 18.1.3 (1ubuntu1)
+  ld.lld: Ubuntu LLD 18.1.3 (compatible with GNU linkers)
+  aarch64-linux-gnu-gcc: aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+  pahole: v1.25
+
+config checks:
+PASS CONFIG_USB_CONFIGFS_ACM=y
+PASS CONFIG_USB_F_ACM=y
+PASS CONFIG_USB_U_SERIAL=y
+PASS CONFIG_BUILTIN_DTB=y
+PASS CONFIG_BUILTIN_DTB_NAME="qcom/sm8750-lenovo-elden"
+PASS CONFIG_CMDLINE_FORCE=y
+PASS CONFIG_EXTRA_FIRMWARE=""
+PASS CONFIG_DEBUG_INFO_BTF=y
+PASS CONFIG_SCHED_CLASS_EXT=y
+PASS CONFIG_CMDLINE byte-identical to umbrella
+
+resolved CONFIG_CMDLINE:
+CONFIG_CMDLINE="console=tty0 fbcon=map:0 fbcon=font:TER16x32 loglevel=3 bootconfig init=/init rdinit=/init ro panic=10 efi=noruntime usbcore.autosuspend=-1 fw_devlink=permissive arm-smmu.disable_bypass=0 clk_ignore_unused pd_ignore_unused regulator_ignore_unused initcall_blacklist=clk_disable_unused,regulator_init_complete,genpd_power_off_unused mem_sleep_default=s2idle root=PARTLABEL=rootfs"
+
+notes:
+  duration_sec is wall clock of the build.sh run that linked Image (build log birth to Image mtime).
+  That run exited while scanning Image: gzip.decompress() rejects the initramfs member because bytes follow it.
+  The member is at Image offset 71801012, matches usr/initramfs_inc_data, and was re-checked with zlib.decompressobj.
+  zstd packaging used that Image and boot.img; the kernel was not relinked.
+  busybox 1.36 has no scripts/config; required applets were set in .config and then make oldconfig.
