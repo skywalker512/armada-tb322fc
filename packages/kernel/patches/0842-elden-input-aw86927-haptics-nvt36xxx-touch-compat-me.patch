@@ -1,0 +1,1558 @@
+From 759784c82e1ee35b1de91382c7aff0bb6e3930ad Mon Sep 17 00:00:00 2001
+From: GEEKiDoS <geek_ds@foxmail.com>
+Date: Wed, 14 Oct 2026 20:46:15 +0800
+Subject: [PATCH 40/48] elden: input: aw86927 haptics, nvt36xxx touch, compat
+ memset
+
+split from 0001; 0011 compat-input prctl is already covered by
+armada 0504, adds only the missing ff_effect memset
+---
+ drivers/input/input-compat.c                  |   2 +
+ drivers/input/misc/aw86927.c                  | 331 ++++++-
+ drivers/input/touchscreen/Kconfig             |  13 +
+ drivers/input/touchscreen/Makefile            |   1 +
+ .../input/touchscreen/novatek-nvt36xxx-spi.c  | 926 ++++++++++++++++++
+ 5 files changed, 1230 insertions(+), 43 deletions(-)
+ create mode 100644 drivers/input/touchscreen/novatek-nvt36xxx-spi.c
+
+diff --git a/drivers/input/input-compat.c b/drivers/input/input-compat.c
+index a3c0c7012..8dfe1f456 100644
+--- a/drivers/input/input-compat.c
++++ b/drivers/input/input-compat.c
+@@ -76,6 +76,8 @@ int input_ff_effect_from_user(const char __user *buffer, size_t size,
+ 		 */
+ 		compat_effect = (struct ff_effect_compat *)effect;
+ 
++		memset(effect, 0, sizeof(*effect));
++
+ 		if (copy_from_user(compat_effect, buffer,
+ 				   sizeof(struct ff_effect_compat)))
+ 			return -EFAULT;
+diff --git a/drivers/input/misc/aw86927.c b/drivers/input/misc/aw86927.c
+index f53b8f004..d6074fa77 100644
+--- a/drivers/input/misc/aw86927.c
++++ b/drivers/input/misc/aw86927.c
+@@ -10,13 +10,17 @@
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
+ #include <linux/delay.h>
++#include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/input.h>
+ #include <linux/module.h>
++#include <linux/pm.h>
++#include <linux/property.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/types.h>
++#include <linux/unaligned.h>
+ 
+ #define AW86927_RSTCFG_REG			0x00
+ #define AW86927_RSTCFG_SOFTRST			0xaa
+@@ -47,7 +51,11 @@
+ #define AW86938_PLAYCFG1_BST_MODE_MASK		GENMASK(5, 5)
+ #define AW86938_PLAYCFG1_BST_MODE_BYPASS	0
+ #define AW86938_PLAYCFG1_BST_VOUT_VREFSET_MASK	GENMASK(4, 0)
+-#define AW86938_PLAYCFG1_BST_7000MV		0x11
++#define AW86938_PLAYCFG1_BST_7000MV		0x09
++
++#define AW8693X_PLAYCFG3_AUTO_BST_MASK		BIT(2)
++#define AW8693X_PLAYCFG3_PLAY_MODE_STOP		3
++#define AW8693X_TMCFG_REG			0x5e
+ 
+ #define AW86927_PLAYCFG2_REG			0x07
+ 
+@@ -146,6 +154,7 @@
+ #define AW86927_CHIPIDH_REG			0x57
+ #define AW86927_CHIPIDL_REG			0x58
+ #define AW86927_CHIPID				0x9270
++#define AW86937_CHIPID				0x9370
+ #define AW86938_CHIPID				0x9380
+ 
+ #define AW86927_TMCFG_REG			0x5b
+@@ -182,6 +191,7 @@ enum aw86927_work_mode {
+ 
+ enum aw86927_model {
+ 	AW86927,
++	AW86937,
+ 	AW86938,
+ };
+ 
+@@ -193,7 +203,9 @@ struct aw86927_data {
+ 	struct i2c_client *client;
+ 	struct regmap *regmap;
+ 	struct gpio_desc *reset_gpio;
++	bool suspended;
+ 	u16 level;
++	u32 waveform_index;
+ };
+ 
+ static const struct regmap_config aw86927_regmap_config = {
+@@ -286,11 +298,10 @@ static int aw86927_play_mode(struct aw86927_data *haptics, u8 play_mode)
+ 		if (err)
+ 			return err;
+ 
+-		err = regmap_update_bits(haptics->regmap,
+-					 AW86927_PLAYCFG1_REG,
+-					 AW86927_PLAYCFG1_BST_MODE_MASK,
+-					 FIELD_PREP(AW86927_PLAYCFG1_BST_MODE_MASK,
+-						    AW86927_PLAYCFG1_BST_MODE_BYPASS));
++		err = regmap_update_bits(haptics->regmap, AW86927_PLAYCFG1_REG,
++					 haptics->model == AW86927 ?
++					 AW86927_PLAYCFG1_BST_MODE_MASK :
++					 AW86938_PLAYCFG1_BST_MODE_MASK, 0);
+ 		if (err)
+ 			return err;
+ 
+@@ -298,7 +309,8 @@ static int aw86927_play_mode(struct aw86927_data *haptics, u8 play_mode)
+ 					 AW86927_VBATCTRL_REG,
+ 					 AW86927_VBATCTRL_VBAT_MODE_MASK,
+ 					 FIELD_PREP(AW86927_VBATCTRL_VBAT_MODE_MASK,
+-						    AW86927_VBATCTRL_VBAT_MODE_SW));
++						    haptics->model == AW86927 ?
++						    AW86927_VBATCTRL_VBAT_MODE_SW : 1));
+ 		if (err)
+ 			return err;
+ 
+@@ -312,13 +324,26 @@ static int aw86927_stop(struct aw86927_data *haptics)
+ {
+ 	int err;
+ 
+-	err = regmap_write(haptics->regmap, AW86927_PLAYCFG4_REG, AW86927_PLAYCFG4_STOP);
++	/* AW8693x stops by issuing GO in the dedicated stop mode. */
++	if (haptics->model != AW86927) {
++		err = regmap_update_bits(haptics->regmap, AW86927_PLAYCFG3_REG,
++					 AW86927_PLAYCFG3_PLAY_MODE_MASK,
++					 AW8693X_PLAYCFG3_PLAY_MODE_STOP);
++		if (err)
++			return err;
++	}
++
++	err = regmap_write(haptics->regmap, AW86927_PLAYCFG4_REG,
++			   haptics->model == AW86927 ? AW86927_PLAYCFG4_STOP :
++			   AW86927_PLAYCFG4_GO);
+ 	if (err) {
+ 		dev_err(haptics->dev, "Failed to stop playback: %d\n", err);
+ 		return err;
+ 	}
+ 
+ 	err = aw86927_wait_enter_standby(haptics);
++	if (err && haptics->model != AW86927)
++		return err;
+ 	if (err) {
+ 		dev_err(haptics->dev, "Failed to enter standby, trying to force it\n");
+ 		err = aw86927_play_mode(haptics, AW86927_STANDBY_MODE);
+@@ -334,22 +359,25 @@ static int aw86927_haptics_play(struct input_dev *dev, void *data, struct ff_eff
+ 	struct aw86927_data *haptics = input_get_drvdata(dev);
+ 	int level;
+ 
++	if (haptics->suspended)
++		return 0;
++
+ 	level = effect->u.rumble.strong_magnitude;
+ 	if (!level)
+ 		level = effect->u.rumble.weak_magnitude;
+ 
+ 	/* If level does not change, don't restart playback */
+-	if (haptics->level == level)
++	if (READ_ONCE(haptics->level) == level)
+ 		return 0;
+ 
+-	haptics->level = level;
++	WRITE_ONCE(haptics->level, level);
+ 
+ 	schedule_work(&haptics->play_work);
+ 
+ 	return 0;
+ }
+ 
+-static int aw86927_play_sine(struct aw86927_data *haptics)
++static int aw86927_play_sine(struct aw86927_data *haptics, u16 level)
+ {
+ 	int err;
+ 
+@@ -362,16 +390,17 @@ static int aw86927_play_sine(struct aw86927_data *haptics)
+ 		return err;
+ 
+ 	err = regmap_update_bits(haptics->regmap, AW86927_PLAYCFG3_REG,
+-				 AW86927_PLAYCFG3_AUTO_BST_MASK,
+-				 FIELD_PREP(AW86927_PLAYCFG3_AUTO_BST_MASK,
+-					    AW86927_PLAYCFG3_AUTO_BST_ENABLE));
++				 haptics->model == AW86927 ?
++				 AW86927_PLAYCFG3_AUTO_BST_MASK : AW8693X_PLAYCFG3_AUTO_BST_MASK,
++				 haptics->model == AW86927 ?
++				 AW86927_PLAYCFG3_AUTO_BST_MASK : AW8693X_PLAYCFG3_AUTO_BST_MASK);
+ 	if (err)
+ 		return err;
+ 
+-	/* Set waveseq 1 to the first wave */
++	/* Loop the selected motor waveform. */
+ 	err = regmap_update_bits(haptics->regmap, AW86927_WAVCFG1_REG,
+ 				 AW86927_WAVCFG1_WAVSEQ1_MASK,
+-				 FIELD_PREP(AW86927_WAVCFG1_WAVSEQ1_MASK, 1));
++				 FIELD_PREP(AW86927_WAVCFG1_WAVSEQ1_MASK, haptics->waveform_index));
+ 	if (err)
+ 		return err;
+ 
+@@ -390,7 +419,7 @@ static int aw86927_play_sine(struct aw86927_data *haptics)
+ 	if (err)
+ 		return err;
+ 
+-	err = regmap_write(haptics->regmap, AW86927_PLAYCFG2_REG, haptics->level * 0x80 / 0xffff);
++	err = regmap_write(haptics->regmap, AW86927_PLAYCFG2_REG, level * 0x80 / 0xffff);
+ 	if (err)
+ 		return err;
+ 
+@@ -409,6 +438,7 @@ static void aw86927_close(struct input_dev *input)
+ 	int err;
+ 
+ 	cancel_work_sync(&haptics->play_work);
++	WRITE_ONCE(haptics->level, 0);
+ 
+ 	err = aw86927_stop(haptics);
+ 	if (err)
+@@ -420,10 +450,11 @@ static void aw86927_haptics_play_work(struct work_struct *work)
+ 	struct aw86927_data *haptics =
+ 		container_of(work, struct aw86927_data, play_work);
+ 	struct device *dev = &haptics->client->dev;
++	u16 level = READ_ONCE(haptics->level);
+ 	int err;
+ 
+-	if (haptics->level)
+-		err = aw86927_play_sine(haptics);
++	if (level)
++		err = aw86927_play_sine(haptics, level);
+ 	else
+ 		err = aw86927_stop(haptics);
+ 
+@@ -443,10 +474,76 @@ static void aw86927_hw_reset(struct aw86927_data *haptics)
+ 	usleep_range(8000, 8500);
+ }
+ 
++static int aw8693x_haptic_init(struct aw86927_data *haptics)
++{
++	static const struct reg_sequence analog_init[] = {
++		{ 0x6f, 0x1c }, { 0x70, 0x0e }, { 0x72, 0x03 },
++		{ 0x77, 0x80 }, { 0x7d, 0x41 },
++	};
++	int err, lock_err;
++
++	/* 24 kHz RAM playback, direct gain, edge interrupt. */
++	err = regmap_update_bits(haptics->regmap, AW86927_SYSCTRL4_REG,
++				 AW86927_SYSCTRL4_WAVDAT_MODE_MASK |
++				 AW86927_SYSCTRL4_GAIN_BYPASS_MASK, 1);
++	if (err)
++		return err;
++
++	err = regmap_update_bits(haptics->regmap, AW86927_CONTCFG1_REG, BIT(7), 0);
++	if (err)
++		return err;
++	err = regmap_update_bits(haptics->regmap, AW86927_CONTCFG5_REG,
++				 AW86927_CONTCFG5_BRK_GAIN_MASK, 8);
++	if (err)
++		return err;
++	err = regmap_write(haptics->regmap, AW86927_CONTCFG10_REG, 8);
++	if (err)
++		return err;
++
++	err = regmap_update_bits(haptics->regmap, AW86927_PWMCFG1_REG,
++				 AW86927_PWMCFG1_PRC_EN_MASK, 0);
++	if (err)
++		return err;
++	err = regmap_write(haptics->regmap, AW86927_PWMCFG3_REG, 0xbf);
++	if (err)
++		return err;
++	err = regmap_write(haptics->regmap, AW86927_PWMCFG4_REG, 0x32);
++	if (err)
++		return err;
++	/* Hardware battery compensation reference: 4.2 V. */
++	err = regmap_update_bits(haptics->regmap, AW86927_DETCFG1_REG, GENMASK(6, 4), 0x30);
++	if (err)
++		return err;
++
++	err = regmap_write(haptics->regmap, AW8693X_TMCFG_REG, AW86927_TMCFG_UNLOCK);
++	if (err)
++		return err;
++	/* Keep the reset undervoltage threshold selected by the vendor. */
++	err = regmap_update_bits(haptics->regmap, 0x56, GENMASK(1, 0), 0);
++	if (!err)
++		err = regmap_multi_reg_write(haptics->regmap, analog_init, ARRAY_SIZE(analog_init));
++	lock_err = regmap_write(haptics->regmap, AW8693X_TMCFG_REG, AW86927_TMCFG_LOCK);
++	if (err || lock_err)
++		return err ?: lock_err;
++
++	/* RAM loop uses bypass with automatic boost. Limit boost to 7 V. */
++	err = regmap_update_bits(haptics->regmap, AW86938_PLAYCFG1_REG,
++				 AW86938_PLAYCFG1_BST_VOUT_VREFSET_MASK,
++				 AW86938_PLAYCFG1_BST_7000MV);
++	if (err)
++		return err;
++
++	return regmap_update_bits(haptics->regmap, AW86927_PLAYCFG3_REG,
++				  AW8693X_PLAYCFG3_AUTO_BST_MASK, 0);
++}
++
+ static int aw86927_haptic_init(struct aw86927_data *haptics)
+ {
+ 	int err;
+ 
++	if (haptics->model != AW86927)
++		return aw8693x_haptic_init(haptics);
++
+ 	err = regmap_update_bits(haptics->regmap,
+ 				 AW86927_SYSCTRL4_REG,
+ 				 AW86927_SYSCTRL4_WAVDAT_MODE_MASK,
+@@ -578,26 +675,13 @@ static int aw86927_haptic_init(struct aw86927_data *haptics)
+ 	if (err)
+ 		return err;
+ 
+-	switch (haptics->model) {
+-	case AW86927:
+-		err = regmap_update_bits(haptics->regmap,
+-					 AW86927_PLAYCFG1_REG,
+-					 AW86927_PLAYCFG1_BST_VOUT_VREFSET_MASK,
+-					 FIELD_PREP(AW86927_PLAYCFG1_BST_VOUT_VREFSET_MASK,
+-						    AW86927_PLAYCFG1_BST_8500MV));
+-		if (err)
+-			return err;
+-		break;
+-	case AW86938:
+-		err = regmap_update_bits(haptics->regmap,
+-					 AW86938_PLAYCFG1_REG,
+-					 AW86938_PLAYCFG1_BST_VOUT_VREFSET_MASK,
+-					 FIELD_PREP(AW86938_PLAYCFG1_BST_VOUT_VREFSET_MASK,
+-						    AW86938_PLAYCFG1_BST_7000MV));
+-		if (err)
+-			return err;
+-		break;
+-	}
++	err = regmap_update_bits(haptics->regmap,
++				 AW86927_PLAYCFG1_REG,
++				 AW86927_PLAYCFG1_BST_VOUT_VREFSET_MASK,
++				 FIELD_PREP(AW86927_PLAYCFG1_BST_VOUT_VREFSET_MASK,
++					    AW86927_PLAYCFG1_BST_8500MV));
++	if (err)
++		return err;
+ 
+ 	err = regmap_update_bits(haptics->regmap,
+ 				 AW86927_PLAYCFG3_REG,
+@@ -610,10 +694,92 @@ static int aw86927_haptic_init(struct aw86927_data *haptics)
+ 	return 0;
+ }
+ 
++static int aw86927_ram_load(struct aw86927_data *haptics, const char *name)
++{
++	const struct firmware *fw;
++	u8 readback[16];
++	u16 checksum = 0;
++	unsigned int base, first, start, end, i;
++	int err, disable_err;
++
++	err = request_firmware(&fw, name, haptics->dev);
++	if (err)
++		return err;
++
++	err = -EINVAL;
++	if (fw->size < 9 || fw->size > 4096)
++		goto release;
++	for (i = 2; i < fw->size; i++)
++		checksum += fw->data[i];
++	base = get_unaligned_be16(fw->data + 2);
++	first = get_unaligned_be16(fw->data + 5);
++	if (checksum != get_unaligned_be16(fw->data) ||
++	    base < 0x800 || base + fw->size - 4 > 0x1000 ||
++	    first <= base || (first - base - 1) % 4 ||
++	    first >= base + fw->size - 4 ||
++	    haptics->waveform_index > (first - base - 1) / 4)
++		goto release;
++	i = 5 + (haptics->waveform_index - 1) * 4;
++	start = get_unaligned_be16(fw->data + i);
++	end = get_unaligned_be16(fw->data + i + 2);
++	if (start < first || end < start || end >= base + fw->size - 4)
++		goto release;
++
++	err = aw86927_stop(haptics);
++	if (err)
++		goto release;
++	err = regmap_update_bits(haptics->regmap, AW86927_SYSCTRL3_REG,
++				 AW86927_SYSCTRL3_EN_RAMINIT_MASK,
++				 AW86927_SYSCTRL3_EN_RAMINIT_MASK);
++	if (err)
++		goto release;
++	usleep_range(1000, 1500);
++	err = regmap_write(haptics->regmap, AW86927_BASEADDRH_REG, base >> 8);
++	if (!err)
++		err = regmap_write(haptics->regmap, AW86927_BASEADDRL_REG, base & 0xff);
++	if (!err)
++		err = regmap_write(haptics->regmap, AW86927_RAMADDRH_REG, base >> 8);
++	if (!err)
++		err = regmap_write(haptics->regmap, AW86927_RAMADDRL_REG, base & 0xff);
++	/* Keep transfers within the controller's FIFO path. */
++	for (i = 4; !err && i < fw->size; i += 16)
++		err = regmap_noinc_write(haptics->regmap, AW86927_RAMDATA_REG,
++					 fw->data + i, min_t(size_t, 16, fw->size - i));
++	/* Verify SRAM before exposing an input device. */
++	if (!err)
++		err = regmap_write(haptics->regmap, AW86927_RAMADDRH_REG, base >> 8);
++	if (!err)
++		err = regmap_write(haptics->regmap, AW86927_RAMADDRL_REG, base & 0xff);
++	for (i = 4; !err && i < fw->size; i += sizeof(readback)) {
++		size_t len = min_t(size_t, sizeof(readback), fw->size - i);
++
++		err = regmap_noinc_read(haptics->regmap, AW86927_RAMDATA_REG, readback, len);
++		if (!err && memcmp(readback, fw->data + i, len))
++			err = -EILSEQ;
++	}
++	disable_err = regmap_update_bits(haptics->regmap, AW86927_SYSCTRL3_REG,
++					 AW86927_SYSCTRL3_EN_RAMINIT_MASK, 0);
++	if (!err)
++		err = disable_err;
++release:
++	release_firmware(fw);
++	return err;
++}
++
+ static int aw86927_ram_init(struct aw86927_data *haptics)
+ {
++	const char *firmware;
+ 	int err;
+ 
++	if (device_property_present(haptics->dev, "firmware-name")) {
++		err = device_property_read_string(haptics->dev, "firmware-name", &firmware);
++		if (err)
++			return err;
++		return aw86927_ram_load(haptics, firmware);
++	}
++	if (haptics->model == AW86937 || haptics->waveform_index != 1)
++		return -EINVAL;
++
+ 	err = aw86927_wait_enter_standby(haptics);
+ 	if (err)
+ 		return err;
+@@ -624,6 +790,8 @@ static int aw86927_ram_init(struct aw86927_data *haptics)
+ 				 AW86927_SYSCTRL3_EN_RAMINIT_MASK,
+ 				 FIELD_PREP(AW86927_SYSCTRL3_EN_RAMINIT_MASK,
+ 					    AW86927_SYSCTRL3_EN_RAMINIT_ON));
++	if (err)
++		return err;
+ 
+ 	/* AW86938 wants a 1ms delay here */
+ 	usleep_range(1000, 1500);
+@@ -750,6 +918,9 @@ static int aw86927_detect(struct aw86927_data *haptics)
+ 	case AW86927_CHIPID:
+ 		haptics->model = AW86927;
+ 		break;
++	case AW86937_CHIPID:
++		haptics->model = AW86937;
++		break;
+ 	case AW86938_CHIPID:
+ 		haptics->model = AW86938;
+ 		break;
+@@ -761,9 +932,17 @@ static int aw86927_detect(struct aw86927_data *haptics)
+ 	return 0;
+ }
+ 
++static void aw86927_reset(void *data)
++{
++	struct aw86927_data *haptics = data;
++
++	gpiod_set_value_cansleep(haptics->reset_gpio, 1);
++}
++
+ static int aw86927_probe(struct i2c_client *client)
+ {
+ 	struct aw86927_data *haptics;
++	unsigned int irq_status;
+ 	int err;
+ 
+ 	haptics = devm_kzalloc(&client->dev, sizeof(struct aw86927_data), GFP_KERNEL);
+@@ -772,6 +951,15 @@ static int aw86927_probe(struct i2c_client *client)
+ 
+ 	haptics->dev = &client->dev;
+ 	haptics->client = client;
++	haptics->waveform_index = 1;
++	if (device_property_present(haptics->dev, "awinic,ram-waveform-index")) {
++		err = device_property_read_u32(haptics->dev, "awinic,ram-waveform-index",
++					       &haptics->waveform_index);
++		if (err)
++			return err;
++	}
++	if (!haptics->waveform_index || haptics->waveform_index > 127)
++		return -EINVAL;
+ 
+ 	i2c_set_clientdata(client, haptics);
+ 
+@@ -780,15 +968,19 @@ static int aw86927_probe(struct i2c_client *client)
+ 		return dev_err_probe(haptics->dev, PTR_ERR(haptics->regmap),
+ 					"Failed to allocate register map\n");
+ 
+-	haptics->input_dev = devm_input_allocate_device(haptics->dev);
+-	if (!haptics->input_dev)
+-		return -ENOMEM;
+-
+ 	haptics->reset_gpio = devm_gpiod_get(haptics->dev, "reset", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(haptics->reset_gpio))
+ 		return dev_err_probe(haptics->dev, PTR_ERR(haptics->reset_gpio),
+ 				     "Failed to get reset gpio\n");
+ 
++	err = devm_add_action_or_reset(haptics->dev, aw86927_reset, haptics);
++	if (err)
++		return err;
++
++	haptics->input_dev = devm_input_allocate_device(haptics->dev);
++	if (!haptics->input_dev)
++		return -ENOMEM;
++
+ 	/* Hardware reset */
+ 	aw86927_hw_reset(haptics);
+ 
+@@ -821,6 +1013,11 @@ static int aw86927_probe(struct i2c_client *client)
+ 	if (err)
+ 		return dev_err_probe(haptics->dev, err, "Failed to configure interrupt masks\n");
+ 
++	/* Clear reset-time latched status before enabling the interrupt handler. */
++	err = regmap_read(haptics->regmap, AW86927_SYSINT_REG, &irq_status);
++	if (err)
++		return dev_err_probe(haptics->dev, err, "Failed to clear interrupt status\n");
++
+ 	err = devm_request_threaded_irq(haptics->dev, client->irq, NULL,
+ 					aw86927_irq, IRQF_ONESHOT, NULL, haptics);
+ 	if (err)
+@@ -860,8 +1057,54 @@ static int aw86927_probe(struct i2c_client *client)
+ 	return 0;
+ }
+ 
++static void aw86927_shutdown(struct i2c_client *client)
++{
++	struct aw86927_data *haptics = i2c_get_clientdata(client);
++
++	disable_work_sync(&haptics->play_work);
++	aw86927_reset(haptics);
++}
++
++static int aw86927_suspend(struct device *dev)
++{
++	struct aw86927_data *haptics = dev_get_drvdata(dev);
++	int ret;
++
++	guard(mutex)(&haptics->input_dev->mutex);
++
++	/* Block requests from the memless effect timer before draining work. */
++	scoped_guard(spinlock_irq, &haptics->input_dev->event_lock) {
++		haptics->suspended = true;
++	}
++	cancel_work_sync(&haptics->play_work);
++	ret = aw86927_stop(haptics);
++
++	scoped_guard(spinlock_irq, &haptics->input_dev->event_lock) {
++		if (ret)
++			haptics->suspended = false;
++		else
++			WRITE_ONCE(haptics->level, 0);
++	}
++
++	return ret;
++}
++
++static int aw86927_resume(struct device *dev)
++{
++	struct aw86927_data *haptics = dev_get_drvdata(dev);
++
++	guard(mutex)(&haptics->input_dev->mutex);
++	guard(spinlock_irq)(&haptics->input_dev->event_lock);
++	haptics->suspended = false;
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(aw86927_pm_ops, aw86927_suspend, aw86927_resume);
++
+ static const struct of_device_id aw86927_of_id[] = {
+ 	{ .compatible = "awinic,aw86927" },
++	{ .compatible = "awinic,aw86937" },
+ 	{ /* sentinel */ }
+ };
+ 
+@@ -871,8 +1114,10 @@ static struct i2c_driver aw86927_driver = {
+ 	.driver = {
+ 		.name = "aw86927-haptics",
+ 		.of_match_table = aw86927_of_id,
++		.pm = pm_sleep_ptr(&aw86927_pm_ops),
+ 	},
+ 	.probe = aw86927_probe,
++	.shutdown = aw86927_shutdown,
+ };
+ 
+ module_i2c_driver(aw86927_driver);
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 16fa8c276..0f0a74645 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -731,6 +731,19 @@ config TOUCHSCREEN_NOVATEK_NVT_TS
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called novatek-nvt-ts.
+ 
++config TOUCHSCREEN_NOVATEK_NVT36XXX_SPI
++	tristate "Novatek NVT36xxx SPI touchscreen support"
++	depends on SPI
++	depends on DRM_PANEL
++	select FW_LOADER
++	help
++	  Say Y here if you have a Novatek NVT36xxx family touchscreen
++	  connected over SPI. The driver supports NT36536 no-flash host
++	  firmware download and high-resolution multitouch event reporting.
++
++	  To compile this driver as a module, choose M here: the module will
++	  be called novatek-nvt36xxx-spi.
++
+ config TOUCHSCREEN_IMAGIS
+ 	tristate "Imagis touchscreen support"
+ 	depends on I2C
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index e85ab748a..b2cce4158 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -73,6 +73,7 @@ obj-$(CONFIG_TOUCHSCREEN_MMS114)	+= mms114.o
+ obj-$(CONFIG_TOUCHSCREEN_MSG2638)	+= msg2638.o
+ obj-$(CONFIG_TOUCHSCREEN_MTOUCH)	+= mtouch.o
+ obj-$(CONFIG_TOUCHSCREEN_NOVATEK_NVT_TS)	+= novatek-nvt-ts.o
++obj-$(CONFIG_TOUCHSCREEN_NOVATEK_NVT36XXX_SPI) += novatek-nvt36xxx-spi.o
+ obj-$(CONFIG_TOUCHSCREEN_HP600)		+= hp680_ts_input.o
+ obj-$(CONFIG_TOUCHSCREEN_HP7XX)		+= jornada720_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_IPAQ_MICRO)	+= ipaq-micro-ts.o
+diff --git a/drivers/input/touchscreen/novatek-nvt36xxx-spi.c b/drivers/input/touchscreen/novatek-nvt36xxx-spi.c
+new file mode 100644
+index 000000000..3f0092e7d
+--- /dev/null
++++ b/drivers/input/touchscreen/novatek-nvt36xxx-spi.c
+@@ -0,0 +1,926 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Minimal SPI input driver for Novatek NVT36xxx touch controllers.
++ *
++ * The event packet format and SPI framing are based on the Novatek NVT36xxx
++ * Android driver. NT36536 no-flash firmware upload uses the memory map and
++ * auto-copy mode in the shipped Lenovo driver, and Lenovo-provided firmware.
++ */
++
++#include <linux/delay.h>
++#include <linux/firmware.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/property.h>
++#include <linux/spi/spi.h>
++#include <linux/unaligned.h>
++
++#include <drm/drm_panel.h>
++
++#define NVT_POINT_DATA_LEN	108
++#define NVT_POINT_CHECKSUM_LEN	65
++#define NVT_MAX_TOUCHES		10
++#define NVT_TOUCH_RECORD_LEN	6
++
++#define NVT_TOUCH_ENTER		1
++#define NVT_TOUCH_MOVING	2
++
++#define NVT_FW_XFER_LEN		15360
++#define NVT_FW_MAX_PARTITIONS	32
++#define NVT_FW_END_FLAG_LEN	3
++#define NVT_EXPECTED_PID	0x6097
++
++/* Shipped NT36536 profile: trim 15,*,*,23,65,03; three-byte CRC lengths. */
++#define NVT_EVENT_BUF_ADDR	0x130900
++#define NVT_EVENT_RESET_COMPLETE 0x60
++#define NVT_EVENT_FWINFO	0x78
++#define NVT_EVENT_HOST_CMD	0x50
++#define NVT_RESET_STATE_INIT	0xa0
++#define NVT_RESET_STATE_MAX	0xaf
++
++#define NVT_ENG_RST_ADDR		0x7fff80
++#define NVT_CHIP_VER_TRIM_ADDR	0x1fb104
++#define NVT_SWRST_N8_ADDR	0x1fb43e
++#define NVT_BOOT_RDY_ADDR	0x1fb50d
++#define NVT_TX_AUTO_COPY_EN	0x1fc825
++#define NVT_ENB_CASC_ADDR	0x1fb12c
++#define NVT_SPI_DMA_TX_INFO	0x1fc814
++#define NVT_ILM_LENGTH_ADDR	0x1fcc34
++#define NVT_DLM_LENGTH_ADDR	0x1fcc44
++#define NVT_ILM_DES_ADDR	0x1fcc30
++#define NVT_DLM_DES_ADDR	0x1fcc40
++#define NVT_G_ILM_CHECKSUM_ADDR	0x1fcc38
++#define NVT_G_DLM_CHECKSUM_ADDR	0x1fcc48
++
++struct nvt36xxx_partition {
++	u32 bin_addr;
++	u32 sram_addr;
++	u32 size;
++	u32 crc;
++};
++
++struct nvt36xxx {
++	struct spi_device *spi;
++	struct input_dev *input;
++	struct touchscreen_properties prop;
++	const char *firmware_name;
++	/* Serializes SPI transfers and the shared transfer buffers. */
++	struct mutex lock;
++	/* Serializes panel power transitions against input open/close. */
++	struct mutex state_lock;
++	struct drm_panel_follower panel_follower;
++	struct work_struct firmware_work;
++	bool firmware_loaded;
++	bool chip_identified;
++	bool is_cascade;
++	bool input_open;
++	bool irq_enabled;
++	int firmware_error;
++	u8 *fwbuf;
++	/* Separate allocations keep streaming DMA buffers off shared cache lines. */
++	u8 *tx;
++	u8 *rx;
++	u8 point_data[NVT_POINT_DATA_LEN + 1];
++};
++
++static int nvt36xxx_spi_read(struct nvt36xxx *nvt, u8 *buf, size_t len)
++{
++	struct spi_transfer xfer = {
++		.tx_buf = nvt->tx,
++		.rx_buf = nvt->rx,
++		.len = len + 1,
++	};
++	int error;
++
++	if (len < 2 || len > NVT_POINT_DATA_LEN + 1)
++		return -EINVAL;
++
++	guard(mutex)(&nvt->lock);
++
++	memset(nvt->tx, 0, len + 1);
++	memset(nvt->rx, 0, len + 1);
++	memcpy(nvt->tx, buf, len);
++	nvt->tx[0] &= 0x7f;
++
++	/* Match Lenovo's single full-duplex transfer with one dummy byte. */
++	error = spi_sync_transfer(nvt->spi, &xfer, 1);
++	if (error)
++		return error;
++
++	memcpy(buf + 1, nvt->rx + 2, len - 1);
++	return 0;
++}
++
++static int nvt36xxx_spi_write(struct nvt36xxx *nvt, const u8 *buf,
++			      size_t len)
++{
++	int error;
++
++	if (!len || len > NVT_FW_XFER_LEN + 1)
++		return -EINVAL;
++
++	guard(mutex)(&nvt->lock);
++
++	memcpy(nvt->fwbuf, buf, len);
++	nvt->fwbuf[0] |= BIT(7);
++	error = spi_write(nvt->spi, nvt->fwbuf, len);
++
++	return error;
++}
++
++static int nvt36xxx_spi_write_chunk(struct nvt36xxx *nvt, u8 addr,
++				    const u8 *data, size_t len)
++{
++	if (!len || len > NVT_FW_XFER_LEN)
++		return -EINVAL;
++
++	guard(mutex)(&nvt->lock);
++
++	nvt->fwbuf[0] = addr | BIT(7);
++	memcpy(nvt->fwbuf + 1, data, len);
++
++	return spi_write(nvt->spi, nvt->fwbuf, len + 1);
++}
++
++static int nvt36xxx_set_page(struct nvt36xxx *nvt, u32 addr)
++{
++	u8 buf[] = {
++		0xff,
++		(addr >> 15) & 0xff,
++		(addr >> 7) & 0xff,
++	};
++
++	return nvt36xxx_spi_write(nvt, buf, sizeof(buf));
++}
++
++static int nvt36xxx_write_addr(struct nvt36xxx *nvt, u32 addr, u8 value)
++{
++	u8 buf[] = { addr & 0x7f, value };
++	int error;
++
++	error = nvt36xxx_set_page(nvt, addr);
++	if (error)
++		return error;
++
++	return nvt36xxx_spi_write(nvt, buf, sizeof(buf));
++}
++
++static int nvt36xxx_read_addr(struct nvt36xxx *nvt, u32 addr, u8 *value)
++{
++	u8 buf[] = { addr & 0x7f, 0 };
++	int error;
++
++	error = nvt36xxx_set_page(nvt, addr);
++	if (error)
++		return error;
++
++	error = nvt36xxx_spi_read(nvt, buf, sizeof(buf));
++	if (!error)
++		*value = buf[1];
++
++	return error;
++}
++
++static int nvt36xxx_log_trim_id(struct nvt36xxx *nvt, u32 addr)
++{
++	u8 buf[7] = { addr & 0x7f };
++	int error;
++
++	error = nvt36xxx_set_page(nvt, addr);
++	if (error)
++		return error;
++
++	error = nvt36xxx_spi_write(nvt, buf, sizeof(buf));
++	if (error)
++		return error;
++
++	buf[0] = addr & 0x7f;
++	error = nvt36xxx_spi_read(nvt, buf, sizeof(buf));
++	if (error)
++		return error;
++
++	dev_info(&nvt->spi->dev,
++		 "trim ID %02x %02x %02x %02x %02x %02x\n",
++		 buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
++	/* Match the first stock table entry for the observed NT36536 silicon. */
++	if (buf[1] != 0x15 || buf[4] != 0x23 ||
++	    buf[5] != 0x65 || buf[6] != 0x03)
++		return -ENODEV;
++
++	return 0;
++}
++
++static int nvt36xxx_bootloader_reset(struct nvt36xxx *nvt)
++{
++	int error;
++
++	error = nvt36xxx_write_addr(nvt, NVT_SWRST_N8_ADDR, 0x69);
++	if (error)
++		return error;
++	usleep_range(5000, 5500);
++
++	return 0;
++}
++
++static int nvt36xxx_identify(struct nvt36xxx *nvt)
++{
++	u8 value;
++	int error;
++
++	dev_info(&nvt->spi->dev, "NT36536 identification: engineering reset\n");
++	error = nvt36xxx_write_addr(nvt, NVT_ENG_RST_ADDR, 0x5a);
++	if (error)
++		return error;
++	usleep_range(1000, 1500);
++	/* Stock probe waits another 10 ms before its first bootloader reset. */
++	usleep_range(10000, 11000);
++
++	error = nvt36xxx_bootloader_reset(nvt);
++	if (error)
++		return error;
++	error = nvt36xxx_log_trim_id(nvt, NVT_CHIP_VER_TRIM_ADDR);
++	if (error)
++		return error;
++
++	error = nvt36xxx_read_addr(nvt, NVT_ENB_CASC_ADDR, &value);
++	if (error)
++		return error;
++	nvt->is_cascade = !(value & BIT(0));
++	dev_info(&nvt->spi->dev, "NT36536 hardware cascade=%u strap=%02x\n",
++		 nvt->is_cascade, value);
++	return 0;
++}
++
++static int nvt36xxx_add_partition(const struct firmware *fw,
++				  struct nvt36xxx_partition *partitions,
++				  unsigned int *num_partitions,
++				  u32 bin_addr, u32 sram_addr,
++				  u32 size, u32 crc)
++{
++	struct nvt36xxx_partition *partition;
++
++	if (!size)
++		return 0;
++	if (*num_partitions >= NVT_FW_MAX_PARTITIONS)
++		return -E2BIG;
++	if (bin_addr >= fw->size || size >= fw->size - bin_addr)
++		return -EINVAL;
++	if (sram_addr > 0x7fffff || size > 0x7fffff - sram_addr)
++		return -EINVAL;
++
++	partition = &partitions[(*num_partitions)++];
++	partition->bin_addr = bin_addr;
++	partition->sram_addr = sram_addr;
++	partition->size = size;
++	partition->crc = crc;
++
++	return 0;
++}
++
++static int nvt36xxx_parse_firmware(const struct firmware *fw,
++				   struct nvt36xxx_partition *partitions,
++				   unsigned int *num_partitions,
++				   bool *cascade)
++{
++	const u8 *data = fw->data;
++	u32 header_end, limit, pos;
++	u32 bin_addr, sram_addr, size, crc;
++	unsigned int i;
++	int error;
++
++	if (fw->size < 4096 ||
++	    memcmp(data + fw->size - NVT_FW_END_FLAG_LEN,
++		   "NVT", NVT_FW_END_FLAG_LEN))
++		return -EINVAL;
++	if (data[fw->size - 4096] + data[fw->size - 4095] != 0xff)
++		return -EINVAL;
++
++	header_end = get_unaligned_le32(data);
++	if (header_end < 0x30 || header_end > fw->size || header_end % 16)
++		return -EINVAL;
++	/* Overlay images need a separate DLM header parser. */
++	if (data[0x28] & BIT(4))
++		return -EOPNOTSUPP;
++
++	*cascade = !!(data[0x20] & BIT(1));
++	/* This uploader does not implement the optional cascade DMA setup. */
++	if (*cascade && (data[0x29] & BIT(0)))
++		return -EOPNOTSUPP;
++	*num_partitions = 0;
++
++	/*
++	 * The ILM file offset can include more than the two cascade headers.
++	 * Stock finds the first header's end from its self-copy descriptor,
++	 * then locates the second header relative to that boundary.
++	 */
++	limit = header_end;
++	for (pos = 0x30; pos <= header_end - 0x10; pos += 0x10) {
++		if (get_unaligned_le32(data + pos + 4) &&
++		    !get_unaligned_le32(data + pos + 8)) {
++			limit = pos + 0x10;
++			break;
++		}
++	}
++	if (*cascade && limit > header_end / 2)
++		return -EINVAL;
++
++	for (i = 0; i < 2; i++) {
++		pos = i * 12;
++		bin_addr = get_unaligned_le32(data + pos);
++		sram_addr = get_unaligned_le32(data + pos + 4);
++		size = get_unaligned_le32(data + pos + 8);
++		crc = get_unaligned_le32(data + 0x18 + i * 4);
++		if (!size)
++			return -EINVAL;
++
++		error = nvt36xxx_add_partition(fw, partitions,
++					       num_partitions, bin_addr,
++					       sram_addr, size, crc);
++		if (error)
++			return error;
++	}
++
++	for (pos = 0x30; pos <= limit - 0x10; pos += 0x10) {
++		sram_addr = get_unaligned_le32(data + pos);
++		size = get_unaligned_le32(data + pos + 4);
++		bin_addr = get_unaligned_le32(data + pos + 8);
++		crc = get_unaligned_le32(data + pos + 12);
++
++		error = nvt36xxx_add_partition(fw, partitions,
++					       num_partitions, bin_addr,
++					       sram_addr, size, crc);
++		if (error)
++			return error;
++	}
++
++	if (*cascade) {
++		pos = 2 * limit - 0x10;
++		sram_addr = get_unaligned_le32(data + pos);
++		size = get_unaligned_le32(data + pos + 4);
++		bin_addr = get_unaligned_le32(data + pos + 8);
++		crc = get_unaligned_le32(data + pos + 12);
++		if (!size || bin_addr != limit)
++			return -EINVAL;
++		error = nvt36xxx_add_partition(fw, partitions, num_partitions,
++					       bin_addr, sram_addr, size, crc);
++		if (error)
++			return error;
++	}
++
++	return *num_partitions >= 2 ? 0 : -EINVAL;
++}
++
++static int nvt36xxx_write_partition(struct nvt36xxx *nvt,
++				    const struct firmware *fw,
++				    const struct nvt36xxx_partition *partition)
++{
++	size_t remaining = partition->size + 1;
++	u32 bin_addr = partition->bin_addr;
++	u32 sram_addr = partition->sram_addr;
++	int error;
++
++	while (remaining) {
++		size_t len = min_t(size_t, remaining, NVT_FW_XFER_LEN);
++
++		error = nvt36xxx_set_page(nvt, sram_addr);
++		if (error)
++			return error;
++
++		error = nvt36xxx_spi_write_chunk(nvt, sram_addr & 0x7f,
++						 fw->data + bin_addr, len);
++		if (error)
++			return error;
++
++		sram_addr += len;
++		bin_addr += len;
++		remaining -= len;
++	}
++
++	return 0;
++}
++
++static int nvt36xxx_write_le24(struct nvt36xxx *nvt, u32 addr, u32 value)
++{
++	u8 buf[] = {
++		addr & 0x7f,
++		value & 0xff,
++		(value >> 8) & 0xff,
++		(value >> 16) & 0xff,
++	};
++	int error;
++
++	error = nvt36xxx_set_page(nvt, addr);
++	if (error)
++		return error;
++
++	return nvt36xxx_spi_write(nvt, buf, sizeof(buf));
++}
++
++static int nvt36xxx_write_le32(struct nvt36xxx *nvt, u32 addr, u32 value)
++{
++	u8 buf[] = {
++		addr & 0x7f,
++		value & 0xff,
++		(value >> 8) & 0xff,
++		(value >> 16) & 0xff,
++		(value >> 24) & 0xff,
++	};
++	int error;
++
++	error = nvt36xxx_set_page(nvt, addr);
++	if (error)
++		return error;
++
++	return nvt36xxx_spi_write(nvt, buf, sizeof(buf));
++}
++
++static int nvt36xxx_set_crc_banks(struct nvt36xxx *nvt,
++				  const struct nvt36xxx_partition *partitions)
++{
++	int error;
++
++	error = nvt36xxx_write_le24(nvt, NVT_ILM_DES_ADDR,
++				    partitions[0].sram_addr);
++	if (error)
++		return error;
++	error = nvt36xxx_write_le24(nvt, NVT_ILM_LENGTH_ADDR,
++				    partitions[0].size);
++	if (error)
++		return error;
++	error = nvt36xxx_write_le32(nvt, NVT_G_ILM_CHECKSUM_ADDR,
++				    partitions[0].crc);
++	if (error)
++		return error;
++
++	error = nvt36xxx_write_le24(nvt, NVT_DLM_DES_ADDR,
++				    partitions[1].sram_addr);
++	if (error)
++		return error;
++	error = nvt36xxx_write_le24(nvt, NVT_DLM_LENGTH_ADDR,
++				    partitions[1].size);
++	if (error)
++		return error;
++
++	return nvt36xxx_write_le32(nvt, NVT_G_DLM_CHECKSUM_ADDR,
++				   partitions[1].crc);
++}
++
++static int nvt36xxx_wait_dma(struct nvt36xxx *nvt)
++{
++	u8 value;
++	int error, retry;
++
++	for (retry = 0; retry < 200; retry++) {
++		error = nvt36xxx_read_addr(nvt, NVT_TX_AUTO_COPY_EN, &value);
++		if (error)
++			return error;
++		if (!value)
++			return 0;
++		usleep_range(1000, 1500);
++	}
++
++	dev_err(&nvt->spi->dev, "NT36536 auto-copy timed out, status=%02x\n", value);
++	return -ETIMEDOUT;
++}
++
++static int nvt36xxx_wait_reset(struct nvt36xxx *nvt)
++{
++	u8 buf[] = { NVT_EVENT_RESET_COMPLETE, 0, 0, 0, 0, 0 };
++	int error, retry;
++
++	error = nvt36xxx_set_page(nvt, NVT_EVENT_BUF_ADDR);
++	if (error)
++		return error;
++
++	for (retry = 0; retry < 100; retry++) {
++		usleep_range(10000, 11000);
++		buf[0] = NVT_EVENT_RESET_COMPLETE;
++		error = nvt36xxx_spi_read(nvt, buf, sizeof(buf));
++		if (error)
++			return error;
++		if (buf[1] >= NVT_RESET_STATE_INIT &&
++		    buf[1] <= NVT_RESET_STATE_MAX)
++			return 0;
++	}
++
++	dev_err(&nvt->spi->dev,
++		"firmware reset-state timeout: %02x %02x %02x %02x %02x\n",
++		buf[1], buf[2], buf[3], buf[4], buf[5]);
++	return -ETIMEDOUT;
++}
++
++static int nvt36xxx_check_firmware_info(struct nvt36xxx *nvt)
++{
++	u8 buf[39] = { NVT_EVENT_FWINFO };
++	u16 pid;
++	int error;
++
++	error = nvt36xxx_set_page(nvt, NVT_EVENT_BUF_ADDR | NVT_EVENT_FWINFO);
++	if (error)
++		return error;
++
++	error = nvt36xxx_spi_read(nvt, buf, sizeof(buf));
++	if (error)
++		return error;
++	if (buf[1] + buf[2] != 0xff)
++		return -EIO;
++
++	pid = (buf[36] << 8) | buf[35];
++	dev_info(&nvt->spi->dev,
++		 "firmware version %02x.%02x event protocol %02x PID %04x\n",
++		 buf[1], buf[14], buf[13], pid);
++
++	return pid == NVT_EXPECTED_PID ? 0 : -ENODEV;
++}
++
++static int nvt36xxx_upload_firmware_once(struct nvt36xxx *nvt,
++					 const struct firmware *fw)
++{
++	struct nvt36xxx_partition partitions[NVT_FW_MAX_PARTITIONS] = {};
++	unsigned int num_partitions, i;
++	bool cascade;
++	u8 reset_status[] = { NVT_EVENT_RESET_COMPLETE, 0, 0, 0, 0, 0, 0 };
++	u8 crc_command[] = { NVT_EVENT_HOST_CMD, 0xae, 0 };
++	int error;
++
++	error = nvt36xxx_parse_firmware(fw, partitions, &num_partitions, &cascade);
++	if (error)
++		return error;
++
++	dev_info(&nvt->spi->dev,
++		 "host-downloading %u partitions%s\n", num_partitions,
++		 cascade ? " with cascade auto-copy" : "");
++
++	if (!nvt->chip_identified) {
++		error = nvt36xxx_identify(nvt);
++		if (error)
++			return error;
++		nvt->chip_identified = true;
++	}
++
++	/* Stock selects auto-copy from the image header, not the chip strap. */
++	/* Stock starts firmware download with a new bootloader reset. */
++	dev_info(&nvt->spi->dev, "chip identified: starting firmware download\n");
++	error = nvt36xxx_bootloader_reset(nvt);
++	if (error)
++		return error;
++
++	error = nvt36xxx_set_crc_banks(nvt, partitions);
++	if (error)
++		return error;
++
++	if (cascade) {
++		error = nvt36xxx_write_addr(nvt, NVT_TX_AUTO_COPY_EN, 0x56);
++		if (error)
++			return error;
++	}
++
++	for (i = 0; i < num_partitions; i++) {
++		error = nvt36xxx_write_partition(nvt, fw, &partitions[i]);
++		if (error)
++			return error;
++	}
++	dev_info(&nvt->spi->dev, "firmware SRAM transfer complete\n");
++
++	if (cascade) {
++		error = nvt36xxx_wait_dma(nvt);
++		if (error)
++			return error;
++		dev_info(&nvt->spi->dev, "cascade auto-copy complete\n");
++	}
++
++	/* Match the stock reset-status clear and firmware CRC command. */
++	error = nvt36xxx_set_page(nvt, NVT_EVENT_BUF_ADDR);
++	if (error)
++		return error;
++	error = nvt36xxx_spi_write(nvt, reset_status, sizeof(reset_status));
++	if (error)
++		return error;
++	error = nvt36xxx_spi_write(nvt, crc_command, sizeof(crc_command));
++	if (error)
++		return error;
++	error = nvt36xxx_write_addr(nvt, NVT_BOOT_RDY_ADDR, 1);
++	if (error)
++		return error;
++	dev_info(&nvt->spi->dev, "firmware boot-ready asserted\n");
++
++	error = nvt36xxx_wait_reset(nvt);
++	if (error)
++		return error;
++
++	return nvt36xxx_check_firmware_info(nvt);
++}
++
++static int nvt36xxx_upload_firmware(struct nvt36xxx *nvt)
++{
++	const struct firmware *fw;
++	int error;
++
++	error = request_firmware(&fw, nvt->firmware_name, &nvt->spi->dev);
++	if (error)
++		return error;
++
++	/* Leave a failed transport or firmware state for diagnosis until reset. */
++	error = nvt36xxx_upload_firmware_once(nvt, fw);
++
++	release_firmware(fw);
++	return error;
++}
++
++static bool nvt36xxx_valid_checksum(const u8 *data)
++{
++	u8 checksum = 0;
++	int i;
++
++	for (i = 0; i < NVT_POINT_CHECKSUM_LEN - 1; i++)
++		checksum += data[i + 1];
++
++	checksum = ~checksum + 1;
++	return checksum == data[NVT_POINT_CHECKSUM_LEN];
++}
++
++static irqreturn_t nvt36xxx_irq(int irq, void *dev_id)
++{
++	struct nvt36xxx *nvt = dev_id;
++	int error, i;
++
++	memset(nvt->point_data, 0, sizeof(nvt->point_data));
++	error = nvt36xxx_spi_read(nvt, nvt->point_data,
++				  sizeof(nvt->point_data));
++	if (error)
++		return IRQ_HANDLED;
++
++	if (!nvt36xxx_valid_checksum(nvt->point_data))
++		return IRQ_HANDLED;
++
++	for (i = 0; i < NVT_MAX_TOUCHES; i++) {
++		unsigned int offset = 1 + NVT_TOUCH_RECORD_LEN * i;
++		u8 status = nvt->point_data[offset] & 0x7;
++		u8 id = (nvt->point_data[offset] >> 3) - 1;
++		unsigned int x, y, width;
++
++		if (id >= NVT_MAX_TOUCHES)
++			continue;
++		if (status != NVT_TOUCH_ENTER && status != NVT_TOUCH_MOVING)
++			continue;
++
++		x = (nvt->point_data[offset + 1] << 8) |
++		    nvt->point_data[offset + 2];
++		y = (nvt->point_data[offset + 3] << 8) |
++		    nvt->point_data[offset + 4];
++		if (x > nvt->prop.max_x || y > nvt->prop.max_y)
++			continue;
++		width = nvt->point_data[offset + 5];
++		if (!width)
++			width = 1;
++
++		input_mt_slot(nvt->input, id);
++		input_mt_report_slot_state(nvt->input, MT_TOOL_FINGER, true);
++		touchscreen_report_pos(nvt->input, &nvt->prop, x, y, true);
++		input_report_abs(nvt->input, ABS_MT_TOUCH_MAJOR, width);
++		input_report_abs(nvt->input, ABS_MT_PRESSURE, 1);
++	}
++
++	input_mt_sync_frame(nvt->input);
++	input_sync(nvt->input);
++
++	return IRQ_HANDLED;
++}
++
++static int nvt36xxx_open(struct input_dev *input)
++{
++	struct nvt36xxx *nvt = input_get_drvdata(input);
++
++	guard(mutex)(&nvt->state_lock);
++
++	nvt->input_open = true;
++	if (nvt->firmware_loaded && !nvt->irq_enabled) {
++		enable_irq(nvt->spi->irq);
++		nvt->irq_enabled = true;
++	}
++
++	return 0;
++}
++
++static void nvt36xxx_close(struct input_dev *input)
++{
++	struct nvt36xxx *nvt = input_get_drvdata(input);
++
++	guard(mutex)(&nvt->state_lock);
++
++	if (nvt->irq_enabled) {
++		disable_irq(nvt->spi->irq);
++		nvt->irq_enabled = false;
++	}
++	nvt->input_open = false;
++}
++
++static void nvt36xxx_firmware_work(struct work_struct *work)
++{
++	struct nvt36xxx *nvt = container_of(work, struct nvt36xxx,
++					     firmware_work);
++	int error;
++
++	guard(mutex)(&nvt->state_lock);
++
++	if (nvt->firmware_loaded)
++		return;
++
++	error = pinctrl_pm_select_default_state(&nvt->spi->dev);
++	if (!error)
++		error = nvt36xxx_upload_firmware(nvt);
++	nvt->firmware_error = error;
++	if (error) {
++		dev_err(&nvt->spi->dev, "panel-time firmware upload failed: %d\n",
++			error);
++		return;
++	}
++
++	nvt->firmware_loaded = true;
++	if (nvt->input_open && !nvt->irq_enabled) {
++		enable_irq(nvt->spi->irq);
++		nvt->irq_enabled = true;
++	}
++}
++
++static int nvt36xxx_panel_prepared(struct drm_panel_follower *follower)
++{
++	struct nvt36xxx *nvt = container_of(follower, struct nvt36xxx,
++					     panel_follower);
++
++	dev_info(&nvt->spi->dev, "panel prepared: scheduling firmware upload\n");
++	schedule_work(&nvt->firmware_work);
++	return 0;
++}
++
++static int nvt36xxx_panel_unpreparing(struct drm_panel_follower *follower)
++{
++	struct nvt36xxx *nvt = container_of(follower, struct nvt36xxx,
++					     panel_follower);
++	int i;
++
++	cancel_work_sync(&nvt->firmware_work);
++
++	guard(mutex)(&nvt->state_lock);
++
++	if (nvt->irq_enabled) {
++		disable_irq(nvt->spi->irq);
++		nvt->irq_enabled = false;
++	}
++	for (i = 0; i < NVT_MAX_TOUCHES; i++) {
++		input_mt_slot(nvt->input, i);
++		input_mt_report_slot_state(nvt->input, MT_TOOL_FINGER, false);
++	}
++	input_mt_sync_frame(nvt->input);
++	input_sync(nvt->input);
++	nvt->firmware_loaded = false;
++	nvt->firmware_error = -EAGAIN;
++
++	return pinctrl_pm_select_sleep_state(&nvt->spi->dev);
++}
++
++static const struct drm_panel_follower_funcs nvt36xxx_panel_follower_funcs = {
++	.panel_prepared = nvt36xxx_panel_prepared,
++	.panel_unpreparing = nvt36xxx_panel_unpreparing,
++};
++
++static void nvt36xxx_cancel_firmware_work(void *data)
++{
++	struct nvt36xxx *nvt = data;
++
++	cancel_work_sync(&nvt->firmware_work);
++}
++
++static int nvt36xxx_probe(struct spi_device *spi)
++{
++	struct device *dev = &spi->dev;
++	struct nvt36xxx *nvt;
++	struct input_dev *input;
++	int error;
++
++	nvt = devm_kzalloc(dev, sizeof(*nvt), GFP_KERNEL);
++	if (!nvt)
++		return -ENOMEM;
++
++	input = devm_input_allocate_device(dev);
++	if (!input)
++		return -ENOMEM;
++
++	nvt->spi = spi;
++	nvt->input = input;
++	mutex_init(&nvt->lock);
++	mutex_init(&nvt->state_lock);
++	INIT_WORK(&nvt->firmware_work, nvt36xxx_firmware_work);
++	nvt->firmware_error = -EAGAIN;
++	spi_set_drvdata(spi, nvt);
++
++	nvt->fwbuf = devm_kmalloc(dev, NVT_FW_XFER_LEN + 1, GFP_KERNEL);
++	if (!nvt->fwbuf)
++		return -ENOMEM;
++	nvt->tx = devm_kmalloc(dev, NVT_POINT_DATA_LEN + 2, GFP_KERNEL);
++	if (!nvt->tx)
++		return -ENOMEM;
++	nvt->rx = devm_kmalloc(dev, NVT_POINT_DATA_LEN + 2, GFP_KERNEL);
++	if (!nvt->rx)
++		return -ENOMEM;
++
++	if (device_property_read_string(dev, "firmware-name",
++					&nvt->firmware_name))
++		nvt->firmware_name = "novatek_ts_csot_3k_fw.bin";
++
++	spi->mode = SPI_MODE_0;
++	spi->bits_per_word = 8;
++	/* The shipped driver sets these before spi_setup(). */
++	spi->cs_setup.value = 300;
++	spi->cs_setup.unit = SPI_DELAY_UNIT_NSECS;
++	spi->cs_hold.value = 300;
++	spi->cs_hold.unit = SPI_DELAY_UNIT_NSECS;
++	error = spi_setup(spi);
++	if (error)
++		return dev_err_probe(dev, error, "failed to configure SPI\n");
++	dev_info(dev, "stock SPI CS setup/hold delays: 300 ns\n");
++
++	input->name = "NVTCapacitiveTouchScreen";
++	input->id.bustype = BUS_SPI;
++	input->dev.parent = dev;
++	input->open = nvt36xxx_open;
++	input->close = nvt36xxx_close;
++	input_set_drvdata(input, nvt);
++
++	input_set_abs_params(input, ABS_MT_POSITION_X, 0, 19040, 0, 0);
++	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, 30400, 0, 0);
++	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(input, ABS_MT_PRESSURE, 0, 1, 0, 0);
++	touchscreen_parse_properties(input, true, &nvt->prop);
++
++	error = input_mt_init_slots(input, NVT_MAX_TOUCHES,
++				    INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (error)
++		return error;
++
++	error = devm_request_threaded_irq(dev, spi->irq, NULL, nvt36xxx_irq,
++					  IRQF_ONESHOT | IRQF_NO_AUTOEN |
++					  IRQF_TRIGGER_FALLING,
++					  dev_name(dev), nvt);
++	if (error)
++		return dev_err_probe(dev, error, "failed to request IRQ\n");
++
++	if (drm_is_panel_follower(dev)) {
++		error = devm_add_action_or_reset(dev,
++						 nvt36xxx_cancel_firmware_work, nvt);
++		if (error)
++			return error;
++
++		nvt->panel_follower.funcs = &nvt36xxx_panel_follower_funcs;
++		error = devm_drm_panel_add_follower(dev, &nvt->panel_follower);
++		if (error)
++			return dev_err_probe(dev, error,
++					     "failed to follow display panel\n");
++
++	} else {
++		error = nvt36xxx_upload_firmware(nvt);
++		nvt->firmware_error = error;
++		if (error)
++			return dev_err_probe(dev, error, "failed to upload %s\n",
++					     nvt->firmware_name);
++		nvt->firmware_loaded = true;
++	}
++
++	error = input_register_device(input);
++	if (error)
++		return error;
++
++	dev_info(dev, "registered NVT36xxx touchscreen%s\n",
++		 drm_is_panel_follower(dev) ? " as panel follower" : "");
++	return 0;
++}
++
++static const struct of_device_id nvt36xxx_of_match[] = {
++	{ .compatible = "novatek,nt36536-ts" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, nvt36xxx_of_match);
++
++static const struct spi_device_id nvt36xxx_spi_ids[] = {
++	{ "nt36536-ts" },
++	{ }
++};
++MODULE_DEVICE_TABLE(spi, nvt36xxx_spi_ids);
++
++static struct spi_driver nvt36xxx_driver = {
++	.driver = {
++		.name = "novatek-nvt36xxx-spi",
++		.of_match_table = nvt36xxx_of_match,
++	},
++	.probe = nvt36xxx_probe,
++	.id_table = nvt36xxx_spi_ids,
++};
++module_spi_driver(nvt36xxx_driver);
++
++MODULE_DESCRIPTION("Novatek NVT36xxx SPI touchscreen driver");
++MODULE_LICENSE("GPL");
+-- 
+2.54.0 (Apple Git-157)
+

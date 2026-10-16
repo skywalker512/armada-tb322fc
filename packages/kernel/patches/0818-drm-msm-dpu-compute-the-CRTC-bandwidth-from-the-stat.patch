@@ -1,0 +1,68 @@
+From ab4bb31d34d5b3d1177da95e328d705d2c39d493 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Wed, 7 Oct 2026 21:29:50 +0800
+Subject: [PATCH 16/48] drm/msm/dpu: compute the CRTC bandwidth from the state
+ being checked
+
+_dpu_core_perf_calc_bw() is called with the new CRTC state but sums
+plane_fetch_bw over drm_atomic_crtc_for_each_plane(), i.e. the planes of
+the committed state. When the CRTC is re-enabled (DPMS on, system
+resume) the committed state has no planes attached, so the check computes
+bw_ctl = 0 and the display runs without an average bandwidth vote on the
+MDP path until some later commit changes a plane -- which may not happen
+for a long time on a static screen.
+
+Iterate the planes of the state being checked instead.
+
+Imported from joonhoekim/tb323fu-linux kernel/patches/0105 (Joonhoe Kim
+<26rote@gmail.com>).
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c | 17 ++++++-----------
+ 1 file changed, 6 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c
+index 6524531bd..0b4d2c6be 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c
+@@ -54,24 +54,19 @@ u64 dpu_core_perf_adjusted_mode_clk(u64 mode_clk_rate,
+ /**
+  * _dpu_core_perf_calc_bw() - to calculate BW per crtc
+  * @perf_cfg: performance configuration
+- * @crtc: pointer to a crtc
++ * @state: the CRTC state
+  * Return: returns aggregated BW for all planes in crtc.
+  */
+ static u64 _dpu_core_perf_calc_bw(const struct dpu_perf_cfg *perf_cfg,
+-		struct drm_crtc *crtc)
++		struct drm_crtc_state *state)
+ {
+ 	struct drm_plane *plane;
+-	struct dpu_plane_state *pstate;
++	const struct drm_plane_state *plane_state;
+ 	u64 crtc_plane_bw = 0;
+ 	u32 bw_factor;
+ 
+-	drm_atomic_crtc_for_each_plane(plane, crtc) {
+-		pstate = to_dpu_plane_state(plane->state);
+-		if (!pstate)
+-			continue;
+-
+-		crtc_plane_bw += pstate->plane_fetch_bw;
+-	}
++	drm_atomic_crtc_state_for_each_plane_state(plane, plane_state, state)
++		crtc_plane_bw += to_dpu_plane_state(plane_state)->plane_fetch_bw;
+ 
+ 	bw_factor = perf_cfg->bw_inefficiency_factor;
+ 	if (bw_factor) {
+@@ -131,7 +126,7 @@ static void _dpu_core_perf_calc_crtc(const struct dpu_core_perf *core_perf,
+ 		return;
+ 	}
+ 
+-	perf->bw_ctl = _dpu_core_perf_calc_bw(perf_cfg, crtc);
++	perf->bw_ctl = _dpu_core_perf_calc_bw(perf_cfg, state);
+ 	perf->max_per_pipe_ib = perf_cfg->min_dram_ib;
+ 	perf->core_clk_rate = _dpu_core_perf_calc_clk(perf_cfg, crtc, state);
+ 	DRM_DEBUG_ATOMIC(
+-- 
+2.54.0 (Apple Git-157)
+

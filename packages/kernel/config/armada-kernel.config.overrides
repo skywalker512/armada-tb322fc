@@ -384,3 +384,20 @@ CONFIG_CRYPTO_MD5=y
 CONFIG_CRYPTO_SHA1=y
 CONFIG_CRYPTO_SHA256=y
 CONFIG_CRYPTO_SHA512=y
+
+# ============== Lenovo TB322FC (elden) ==============
+# Symbols from the 08xx elden series not already enabled by arm64 defconfig
+# or the generic overrides above. Conventions follow the file: panels and
+# regulators built-in, codecs/touchscreens/camera sensors as modules.
+CONFIG_DRM_PANEL_NOVATEK_NT36536=y          # Y700 Gen4 panel (all board panels are =y)
+CONFIG_TOUCHSCREEN_NOVATEK_NVT36XXX_SPI=m   # SPI touch (SPI=y; device touchscreens are =m)
+CONFIG_SND_SOC_AW88461=m                    # speaker amp (module, like AW88166/AW88261)
+CONFIG_REGULATOR_WL2868C=y                  # camera PMIC (regulators are =y here)
+CONFIG_VIDEO_GC08A8=m                       # rear camera sensor
+CONFIG_VIDEO_S5KJNS=m                       # front camera sensor
+CONFIG_VIDEO_GT9764=m                       # lens actuator
+CONFIG_V4L2_FLASH_LED_CLASS=m               # required for the existing LEDS_QCOM_FLASH=m to build
+CONFIG_BT_HCIUART_SERDEV=y                  # WCN7861 is a serdev BT chip (bool; SERIAL_DEV_BUS=y)
+CONFIG_BT_HCIUART_H4=y                      # WCN7861 speaks H4 (bool)
+CONFIG_BT_BREDR=y                           # BT Classic (bool inside CONFIG_BT=m)
+CONFIG_BT_BNEP=m                            # PAN profile from the elden fragment

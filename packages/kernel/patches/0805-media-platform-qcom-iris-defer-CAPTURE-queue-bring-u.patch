@@ -1,0 +1,142 @@
+From e451c4f1e3f76c1c4e873a78716612b7600de869 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Thu, 1 Oct 2026 16:37:45 +0800
+Subject: [PATCH 03/48] media: platform: qcom: iris: defer CAPTURE queue
+ bring-up on early STREAMON
+
+When a V4L2 client streams the CAPTURE queue before the initial
+source-change event arrives (such as FFmpeg's v4l2m2m decoder which
+streams both OUTPUT and CAPTURE up front), the Lenovo production VPU
+firmware (vpu35_4v.mbn) rejects the subsequent source-change resume with
+HFI_ERROR_FATAL (0x04000003).
+
+Defer all CAPTURE-port HFI bring-up when the client streams CAPTURE while
+the state is still IRIS_INST_INPUT_STREAMING (before FIRST_IPSC). When the
+source-change event arrives and the client issues V4L2_DEC_CMD_START
+(or a subsequent STREAMON), complete the deferred bring-up via the
+normal FIRST_IPSC flow, which the firmware accepts.
+
+Also:
+- Allow V4L2_DEC_CMD_START in iris_allow_cmd() when defer_capture_streamon
+  is active.
+- Mark CAPTURE buffers BUF_ATTR_DEFERRED while bring-up is deferred.
+- Exclude HFI_BUF_FW_FLAG_PSC_LAST from V4L2_BUF_FLAG_ERROR to avoid
+  flagging valid PSC draining buffers as decode errors.
+---
+ .../qcom/iris/iris_hfi_gen2_response.c        |  3 +-
+ .../media/platform/qcom/iris/iris_instance.h  |  6 ++++
+ drivers/media/platform/qcom/iris/iris_state.c |  5 +++
+ drivers/media/platform/qcom/iris/iris_vdec.c  | 36 ++++++++++++++++++-
+ 4 files changed, 48 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+index 25162ae71..770625541 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -391,7 +391,8 @@ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
+ 	buf->flags = iris_hfi_gen2_get_driver_buffer_flags(inst, hfi_buffer->flags);
+ 
+ 	if (!buf->data_size && inst->state == IRIS_INST_STREAMING &&
+-	    !(hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST)) {
++	    !(hfi_buffer->flags & (HFI_BUF_FW_FLAG_LAST |
++				   HFI_BUF_FW_FLAG_PSC_LAST))) {
+ 		buf->flags |= V4L2_BUF_FLAG_ERROR;
+ 	}
+ 
+diff --git a/drivers/media/platform/qcom/iris/iris_instance.h b/drivers/media/platform/qcom/iris/iris_instance.h
+index a770331d1..03bd19170 100644
+--- a/drivers/media/platform/qcom/iris/iris_instance.h
++++ b/drivers/media/platform/qcom/iris/iris_instance.h
+@@ -114,6 +114,12 @@ struct iris_inst {
+ 	u32				metadata_idx;
+ 	u32				codec;
+ 	bool				last_buffer_dequeued;
++	/* Decoder: the client started the CAPTURE queue before the initial
++	 * source change (ffmpeg v4l2m2m does this).  The CAPTURE-port HFI work
++	 * is deferred until the source change arrives, because the vendor
++	 * firmware rejects a capture-port START issued before the initial IPSC.
++	 */
++	bool				defer_capture_streamon;
+ 	u64				last_buf_ns;
+ 	u32				frame_counter;
+ 	u32				frame_rate;
+diff --git a/drivers/media/platform/qcom/iris/iris_state.c b/drivers/media/platform/qcom/iris/iris_state.c
+index 5552725c6..8e0f62eef 100644
+--- a/drivers/media/platform/qcom/iris/iris_state.c
++++ b/drivers/media/platform/qcom/iris/iris_state.c
+@@ -264,6 +264,11 @@ bool iris_allow_cmd(struct iris_inst *inst, u32 cmd)
+ 	struct vb2_queue *dst_q = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
+ 
+ 	if (cmd == V4L2_DEC_CMD_START || cmd == V4L2_ENC_CMD_START) {
++		/* Decoder: CAPTURE was streamed before the initial source
++		 * change, so its bring-up is deferred and completed by
++		 * iris_vdec_start_cmd() when the client issues START. */
++		if (inst->defer_capture_streamon)
++			return true;
+ 		if (vb2_is_streaming(src_q) || vb2_is_streaming(dst_q))
+ 			if (iris_drc_pending(inst) || iris_drain_pending(inst))
+ 				return true;
+diff --git a/drivers/media/platform/qcom/iris/iris_vdec.c b/drivers/media/platform/qcom/iris/iris_vdec.c
+index 9e228b704..519c9f654 100644
+--- a/drivers/media/platform/qcom/iris/iris_vdec.c
++++ b/drivers/media/platform/qcom/iris/iris_vdec.c
+@@ -394,6 +394,23 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
+ 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+ 	int ret;
+ 
++	/*
++	 * The client started the CAPTURE queue before the initial source
++	 * change (ffmpeg's v4l2m2m STREAMONs both queues up front).  The vendor
++	 * firmware (vpu35_4v.mbn) then rejects the source-change resume with
++	 * HFI_ERROR_FATAL, so defer all CAPTURE-port HFI work until the source
++	 * change arrives.  It is completed from iris_vdec_start_cmd() when the
++	 * client issues V4L2_DEC_CMD_START (ffmpeg sends that on the
++	 * source-change event), or from a later STREAMON which then takes the
++	 * normal FIRST_IPSC path.
++	 */
++	if (!(inst->sub_state & (IRIS_INST_SUB_FIRST_IPSC | IRIS_INST_SUB_DRC |
++				 IRIS_INST_SUB_DRAIN)) &&
++	    inst->state == IRIS_INST_INPUT_STREAMING) {
++		inst->defer_capture_streamon = true;
++		return 0;
++	}
++
+ 	ret = hfi_ops->session_set_config_params(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+ 	if (ret)
+ 		return ret;
+@@ -440,7 +457,8 @@ int iris_vdec_qbuf(struct iris_inst *inst, struct vb2_v4l2_buffer *vbuf)
+ 		iris_set_ts_metadata(inst, vbuf);
+ 
+ 	q = v4l2_m2m_get_vq(inst->m2m_ctx, vb2->type);
+-	if (!vb2_is_streaming(q)) {
++	if (!vb2_is_streaming(q) ||
++	    (inst->defer_capture_streamon && buf->type == BUF_OUTPUT)) {
+ 		buf->attr |= BUF_ATTR_DEFERRED;
+ 		return 0;
+ 	}
+@@ -475,6 +493,22 @@ int iris_vdec_start_cmd(struct iris_inst *inst)
+ 
+ 	dst_vq = v4l2_m2m_get_dst_vq(inst->m2m_ctx);
+ 
++	if (inst->defer_capture_streamon) {
++		/*
++		 * The client streamed CAPTURE before the initial source change
++		 * (so the CAPTURE-port bring-up was deferred).  The source
++		 * change has now arrived and put us in the FIRST_IPSC sub-state;
++		 * complete the deferred bring-up here.  This emits the same HFI
++		 * sequence as a normal post-source-change STREAMON, which the
++		 * firmware accepts.
++		 */
++		inst->defer_capture_streamon = false;
++		ret = iris_vdec_streamon_output(inst);
++		if (ret)
++			return ret;
++		return iris_queue_deferred_buffers(inst, BUF_OUTPUT);
++	}
++
+ 	if (inst->sub_state & IRIS_INST_SUB_DRC &&
+ 	    inst->sub_state & IRIS_INST_SUB_DRC_LAST) {
+ 		vb2_clear_last_buffer_dequeued(dst_vq);
+-- 
+2.54.0 (Apple Git-157)
+

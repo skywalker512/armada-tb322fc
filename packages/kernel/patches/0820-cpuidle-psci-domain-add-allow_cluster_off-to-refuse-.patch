@@ -1,0 +1,88 @@
+From 3f4fa9507bb1876f83b3c9d773e52c250084878a Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Wed, 7 Oct 2026 21:31:16 +0800
+Subject: [PATCH 18/48] cpuidle: psci-domain: add allow_cluster_off to refuse
+ cluster idle states
+
+On the Lenovo TB323FU (SM8850) the tablet resets now and then while it
+sits idle: CPUs of cluster0 enter PSCI CPU_SUSPEND and never return, and
+the losses line up with cluster0 being turned off and on by the last CPU
+of the cluster going idle. With psci_pd_power_off() made to refuse the
+cluster domains, the tablet ran 3 h idle without a crash (562364 refused
+cluster0 power-offs) against two crashes in 78 min with them allowed;
+power with the display off was within the ~20 mW measurement noise
+(658 / 659 / 621 mW).
+
+Add a module parameter, allow_cluster_off, default Y (the current
+behaviour). When it is N, psci_pd_power_off() refuses the idle states of
+cluster domains in runtime idle. A cluster domain is one whose subdomains
+have no subdomains of their own, i.e. the parent of CPU domains; the CPU
+domains and the system domain above the clusters are not affected. s2idle
+still uses the cluster states, because the system domain state (CX and
+DDR collapse) can only be entered once the clusters are off.
+
+This is a workaround, not a fix. TB322FC's DT also defines a cluster
+domain idle state (cluster_cl5 / cluster-sleep-0) and it had one
+unexplained PSHOLD hard reset on 2026-09-30, so carry the knob; it can be
+toggled at run time via
+/sys/module/cpuidle_psci_domain/parameters/allow_cluster_off.
+
+Imported from joonhoekim/tb323fu-linux kernel/patches/0118 (Joonhoe Kim
+<26rote@gmail.com>), ported onto this tree.
+---
+ drivers/cpuidle/cpuidle-psci-domain.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/drivers/cpuidle/cpuidle-psci-domain.c b/drivers/cpuidle/cpuidle-psci-domain.c
+index b9e4ad7d4..cda741f6f 100644
+--- a/drivers/cpuidle/cpuidle-psci-domain.c
++++ b/drivers/cpuidle/cpuidle-psci-domain.c
+@@ -12,12 +12,14 @@
+ #include <linux/cpu.h>
+ #include <linux/device.h>
+ #include <linux/kernel.h>
++#include <linux/moduleparam.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/psci.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
++#include <linux/suspend.h>
+ 
+ #include "cpuidle-psci.h"
+ #include "dt_idle_genpd.h"
+@@ -29,11 +31,30 @@ struct psci_pd_provider {
+ 
+ static LIST_HEAD(psci_pd_providers);
+ 
++static bool allow_cluster_off = true;
++module_param(allow_cluster_off, bool, 0644);
++MODULE_PARM_DESC(allow_cluster_off,
++		 "Use the idle states of cluster domains (parents of CPU domains) in runtime idle (default: Y)");
++
++static bool psci_pd_is_cluster(struct generic_pm_domain *pd)
++{
++	struct gpd_link *link;
++
++	link = list_first_entry_or_null(&pd->parent_links, struct gpd_link,
++					parent_node);
++	return link && list_empty(&link->child->parent_links);
++}
++
+ static int psci_pd_power_off(struct generic_pm_domain *pd)
+ {
+ 	struct genpd_power_state *state = &pd->states[pd->state_idx];
+ 	u32 *pd_state;
+ 
++	/* s2idle needs the cluster states to reach the system domain state. */
++	if (!READ_ONCE(allow_cluster_off) && !idle_should_enter_s2idle() &&
++	    psci_pd_is_cluster(pd))
++		return -EBUSY;
++
+ 	if (!state->data)
+ 		return 0;
+ 
+-- 
+2.54.0 (Apple Git-157)
+

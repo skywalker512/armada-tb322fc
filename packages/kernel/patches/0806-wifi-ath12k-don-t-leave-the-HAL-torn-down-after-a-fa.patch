@@ -1,0 +1,63 @@
+From be561b55588a45550deb013ce0ea62b414595d7a Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 16:11:08 +0800
+Subject: [PATCH 04/48] wifi: ath12k: don't leave the HAL torn down after a
+ failed recovery
+
+The device stays bound when reconfiguring on a crash fails, and the
+firmware can announce itself again afterwards. Tearing the ring
+configuration down there leaves the next firmware ready event walking a
+NULL srng_config, which panics in ath12k_ce_init_pipes().
+
+Guard ath12k_core_qmi_firmware_ready() against an uninitialised HAL, and
+stop ath12k_core_reconfigure_on_crash() from deinitialising the rings when
+the reconfigure fails.
+
+Imported from BigfootACA/linux full-v7.1.3 (c5b5cce855), the Xiaomi Pad 8
+Pro (xiaomi-piano, SM8750) mainline tree. Original author: Junhao Xie
+<bigfoot@radxa.com>.
+---
+ drivers/net/wireless/ath/ath12k/core.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+index 274d804e2..ab1a3f6ae 100644
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -1288,6 +1288,16 @@ int ath12k_core_qmi_firmware_ready(struct ath12k_base *ab)
+ 	struct ath12k_hw_group *ag = ath12k_ab_to_ag(ab);
+ 	int ret, i;
+ 
++	/*
++	 * The firmware can announce itself again after a recovery attempt has
++	 * already given up and torn the ring configuration down. Everything
++	 * below walks it, so refuse instead of dereferencing NULL.
++	 */
++	if (!ab->hal.srng_config) {
++		ath12k_err(ab, "firmware ready without an initialized HAL\n");
++		return -EINVAL;
++	}
++
+ 	ret = ath12k_core_start_firmware(ab, ab->fw_mode);
+ 	if (ret) {
+ 		ath12k_err(ab, "failed to start firmware: %d\n", ret);
+@@ -1383,15 +1393,11 @@ static int ath12k_core_reconfigure_on_crash(struct ath12k_base *ab)
+ 
+ 	ret = ath12k_core_qmi_firmware_ready(ab);
+ 	if (ret)
+-		goto err_hal_srng_deinit;
++		return ret;
+ 
+ 	clear_bit(ATH12K_FLAG_RECOVERY, &ab->dev_flags);
+ 
+ 	return 0;
+-
+-err_hal_srng_deinit:
+-	ath12k_hal_srng_deinit(ab);
+-	return ret;
+ }
+ 
+ static void ath12k_rfkill_work(struct work_struct *work)
+-- 
+2.54.0 (Apple Git-157)
+

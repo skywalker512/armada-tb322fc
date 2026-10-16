@@ -1,0 +1,45 @@
+From 839cf0c5da5493c24449e69b79737c757b9fae54 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 16:12:00 +0800
+Subject: [PATCH 30/48] drm/msm/dpu: stop the video pipeline before the timing
+ engine
+
+---
+ .../gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c   | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index ba810f26e..e1697e01d 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -601,6 +601,19 @@ static void dpu_encoder_phys_vid_disable(struct dpu_encoder_phys *phys_enc)
+ 		return;
+ 	}
+ 
++	/*
++	 * Tear the pipeline down while the timing engine is still running.
++	 * The cleanup ends in a CTL flush, and in video mode a flush is only
++	 * consumed at a frame boundary. Doing this after the timing engine has
++	 * been stopped leaves the flush to be swallowed by the CTL_START that
++	 * follows it, which video mode does not otherwise use, and the teardown
++	 * then only reaches the shadow registers. The stale active
++	 * configuration survives into the next enable and the SSPP fetch never
++	 * restarts: every register reads back correctly while the layer mixer
++	 * keeps emitting its border colour.
++	 */
++	dpu_encoder_helper_phys_cleanup(phys_enc);
++
+ 	spin_lock_irqsave(phys_enc->enc_spinlock, lock_flags);
+ 	phys_enc->hw_intf->ops.enable_timing(phys_enc->hw_intf, 0);
+ 	if (dpu_encoder_phys_vid_is_master(phys_enc))
+@@ -645,7 +658,6 @@ static void dpu_encoder_phys_vid_disable(struct dpu_encoder_phys *phys_enc)
+ 		}
+ 	}
+ 
+-	dpu_encoder_helper_phys_cleanup(phys_enc);
+ 	phys_enc->enable_state = DPU_ENC_DISABLED;
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,93 @@
+From 0e52c085f81651fe777696cf196b5563209159dd Mon Sep 17 00:00:00 2001
+From: GEEKiDoS <geek_ds@foxmail.com>
+Date: Wed, 14 Oct 2026 20:46:15 +0800
+Subject: [PATCH 43/48] elden: pcie: qcom controller and qmp phy changes
+
+split from 0001; folds in 0033 (honour opp-suspend OPP floor);
+keeps Armada's #iommu-cells-aware BDF-to-SID implementation
+---
+ drivers/pci/controller/dwc/pcie-qcom.c   |  5 +++++
+ drivers/phy/qualcomm/phy-qcom-qmp-pcie.c | 18 ++++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index c1c0490fb..ec6cb2903 100644
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -27,6 +27,7 @@
+ #include <linux/pci-pwrctrl.h>
+ #include <linux/pm_opp.h>
+ #include <linux/pm_runtime.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/platform_device.h>
+ #include <linux/phy/pcie.h>
+ #include <linux/phy/phy.h>
+@@ -1127,6 +1128,7 @@ static int qcom_pcie_config_sid_1_9_0(struct qcom_pcie *pcie)
+ 	u32 iommu_cells, entry_cells, phandle, smmu_sid_base;
+ 	int i, nr_cells, nr_map, size = 0;
+ 	u32 val;
++	int ret = 0;
+ 
+ 	map = of_get_property(dev->of_node, "iommu-map", &size);
+ 	if (!map || !size)
+@@ -2292,6 +2294,9 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
+ 				dev_err(dev, "Failed to set suspend OPP: %d\n", ret);
+ 		}
+ 	} else {
++		/* The active controller still needs its power domain. */
++		device_set_awake_path(dev);
++
+ 		/*
+ 		 * Set minimum bandwidth required to keep data path
+ 		 * functional during suspend.
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-pcie.c b/drivers/phy/qualcomm/phy-qcom-qmp-pcie.c
+index 3618812e8..db59eed82 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-pcie.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-pcie.c
+@@ -17,6 +17,7 @@
+ #include <linux/phy/pcie.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_wakeup.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+@@ -5474,6 +5475,7 @@ static int qmp_pcie_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	qmp->dev = dev;
++	dev_set_drvdata(dev, qmp);
+ 
+ 	qmp->cfg = of_device_get_match_data(dev);
+ 	if (!qmp->cfg)
+@@ -5666,11 +5668,27 @@ static const struct of_device_id qmp_pcie_of_match_table[] = {
+ };
+ MODULE_DEVICE_TABLE(of, qmp_pcie_of_match_table);
+ 
++static int qmp_pcie_suspend_noirq(struct device *dev)
++{
++	struct qmp_pcie *qmp = dev_get_drvdata(dev);
++
++	/* A retained link still needs its PHY power domain. */
++	if (qmp->phy->power_count)
++		device_set_awake_path(dev);
++
++	return 0;
++}
++
++static const struct dev_pm_ops qmp_pcie_pm_ops = {
++	.suspend_noirq = qmp_pcie_suspend_noirq,
++};
++
+ static struct platform_driver qmp_pcie_driver = {
+ 	.probe		= qmp_pcie_probe,
+ 	.driver = {
+ 		.name	= "qcom-qmp-pcie-phy",
+ 		.of_match_table = qmp_pcie_of_match_table,
++		.pm = pm_ptr(&qmp_pcie_pm_ops),
+ 	},
+ };
+ 
+-- 
+2.54.0 (Apple Git-157)
+

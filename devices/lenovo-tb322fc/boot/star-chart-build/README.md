@@ -26,7 +26,7 @@
 |---|---|
 | `boot-stock.img` | 原厂 boot 分区完整 dump（需等于 boot 分区大小） |
 | `Image.stock` | stock boot 内的原始内核 Image |
-| `Image.linux` | h0cheung `v7.2-elden` 系内核 Image |
+| `Image.linux` | Armada 通用内核 Image（含 elden 0803-0850 补丁） |
 | `internal.dtb` | Linux payload DTB，须含 `/chosen` 的 `armada,boot-stage="os"` |
 | `tf.dtb` | TF 卡启动用 DTB（同 contract） |
 | `avbtool.py` | AOSP avbtool（testkey 重签） |

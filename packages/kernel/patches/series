@@ -223,3 +223,61 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0529-ASoC-qdsp6-q6apm-fail-the-graph-open-when-the-DSP-rejects-it.patch
 0530-ASoC-qdsp6-release-AudioReach-graphs-across-system-suspend.patch
 0532-hwmon-pwm-fan-optionally-run-the-fan-while-charging-in-s2idle.patch
+
+# ============== Lenovo TB322FC (elden) ==============
+# 0800-0802 intentionally omitted: h0cheung distro-only changes
+# (Android wrapped-key userdata fscrypt/dm-default-key, selftests fixup,
+# distro config fragments) that would alter the common kernel for all
+# devices or are unused by the Armada boot chain.
+# 0835 intentionally omitted: wires sm8750 DSPP GC as a legacy v1.8 register
+# block, contradicting Armada 0068 (GC v2 on this DSPP is a LUT-bus block);
+# the catalog entry is shared by every SM8750 device. Revisit on hardware.
+# 0831, 0846 intentionally omitted: identical to 0121's presync_floor
+# feature (gfx_gmu/gmxc_sm8750 + sm8750 table switch); elden's copies
+# would only re-define the structs and flip the unrelated kaanapali
+# table / base gfx/gmxc structs, changing non-elden devices.
+0803-drm-msm-dpu-restore-the-core-clock-OPP-before-runtim.patch
+0804-clk-qcom-gdsc-pair-the-GX-do-nothing-enable-with-a-m.patch
+0805-media-platform-qcom-iris-defer-CAPTURE-queue-bring-u.patch
+0806-wifi-ath12k-don-t-leave-the-HAL-torn-down-after-a-fa.patch
+0807-soc-qcom-apr-install-the-GPR-callback-before-probing.patch
+0808-arm64-dts-qcom-sm8750-add-GPU-cooling.patch
+0809-drm-msm-adreno-a8xx-force-GX-GDSC-collapse-before-CX.patch
+0810-clk-qcom-gxclkctl-kaanapali-don-t-poll-CFG_GDSCR-for.patch
+0811-arm64-dts-qcom-sm8750-reserve-the-low-IOVA-range-for.patch
+0812-iommu-arm-smmu-prepare-the-clocks-from-runtime-PM-no.patch
+0813-media-iris-defer-Gen2-DPB-buffer-destruction.patch
+0814-media-iris-allow-larger-capture-buffer-pools-on-HFI-.patch
+0815-media-iris-fix-frame-interval-enumeration-for-non-di.patch
+0816-media-iris-drop-the-deferred-CAPTURE-state-when-the-.patch
+0817-drm-msm-dpu-disable-the-slave-encoder-before-the-mas.patch
+0818-drm-msm-dpu-compute-the-CRTC-bandwidth-from-the-stat.patch
+0819-media-iris-don-t-wait-for-the-threaded-IRQ-handler-u.patch
+0820-cpuidle-psci-domain-add-allow_cluster_off-to-refuse-.patch
+0821-wifi-ath12k-keep-the-RX-refill-ring-from-running-dry.patch
+0822-net-qrtr-ns-retry-announcements-the-new-node-is-not-.patch
+0823-rpmsg-qcom_glink-fix-deadlock-during-endpoint-teardo.patch
+0824-remoteproc-qcom-check-glink-edge-in-glink_subdev_sto.patch
+0825-usb-typec-ucsi-glink-set-initial-orientation-during-.patch
+0826-wifi-ath12k-arm-the-connection-loss-timer-only-while.patch
+0827-wifi-ath12k-shorten-the-MHI-probe-timeout-to-3s.patch
+0828-firmware-psci-map-reboot-reason-to-SM8750-SYSTEM_RES.patch
+0829-power-supply-qcom_battmgr-omit-SM8750-maximum-load-p.patch
+0830-usb-typec-ucsi-Y700-let-a-USB-less-power-source-yiel.patch
+0832-drm-msm-dpu-stop-the-video-pipeline-before-the-timin.patch
+0833-power-supply-qcom_battmgr-poll-battery-capacity-peri.patch
+0834-ASoC-qcom-q6apm-lpass-dais-start-the-MI2S-BE-graph-a.patch
+# 0836 intentionally omitted: misanchored duplicate of 0840's sm8750-gated block
+0837-elden-dt-bindings-bindings-for-Y700-Gen4-hardware.patch
+0838-elden-arm64-clk-sm8750-platform-plumbing-for-Y700-Ge.patch
+0839-elden-bluetooth-WCN7861-Peach-support.patch
+0840-elden-drm-msm-sm8750-dsi-dpu-adreno-board-support.patch
+0841-elden-panel-novatek-nt36536-driver.patch
+0842-elden-input-aw86927-haptics-nvt36xxx-touch-compat-me.patch
+0843-elden-media-sm8750-camss-sensor-drivers-cci-halt.patch
+0844-elden-ath12k-WCN7861-hw-entry-and-QDSS-trace-config.patch
+0845-elden-pcie-qcom-controller-and-qmp-phy-changes.patch
+0847-elden-power-WCN7861-pwrseq-wl2868c-regulator-battmgr.patch
+0848-elden-usb-dwc3-dual-port-handover-and-s2idle-host-mo.patch
+0849-elden-sound-aw88461-codec-and-audioreach-q6apm-updat.patch
+0850-elden-misc-smmu-flash-led-ptn3222-q6v5-handover-irq.patch

@@ -1,0 +1,45 @@
+From e00f17693cf2fc10dc5ce8b7e2d8433e853a1912 Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Tue, 6 Oct 2026 16:11:59 +0800
+Subject: [PATCH 08/48] clk: qcom: gxclkctl-kaanapali: don't poll CFG_GDSCR for
+ GX
+
+This block sits inside the domain it controls, so once GX collapses its
+registers read back as zero and power-down-complete is never observed.
+Every GPU runtime suspend warned and left the domain accounted for as on.
+
+Poll the power-on bit instead: a zero read is an unambiguous "off", and
+the power-up direction is never polled because the GMU, not this driver,
+brings GX up.
+
+Imported from BigfootACA/linux full-v7.1.3 (fddf8c5e37), the Xiaomi Pad 8
+Pro (xiaomi-piano, SM8750) mainline tree. Original author: Junhao Xie
+<bigfoot@radxa.com>.
+---
+ drivers/clk/qcom/gxclkctl-kaanapali.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/clk/qcom/gxclkctl-kaanapali.c b/drivers/clk/qcom/gxclkctl-kaanapali.c
+index a03da6148..03eb75aff 100644
+--- a/drivers/clk/qcom/gxclkctl-kaanapali.c
++++ b/drivers/clk/qcom/gxclkctl-kaanapali.c
+@@ -28,7 +28,15 @@ static struct gdsc gx_clkctl_gx_gdsc = {
+ 		.power_off = gdsc_gx_disable,
+ 	},
+ 	.pwrsts = PWRSTS_OFF_ON,
+-	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
++	/*
++	 * Poll the power-on bit rather than CFG_GDSCR: this block sits inside
++	 * the domain it controls, so once GX collapses its registers read back
++	 * as zero and the power-down-complete bit can never be observed. A zero
++	 * read is an unambiguous "off" through the power-on bit, and the
++	 * power-up direction is never polled because the GMU, not this driver,
++	 * brings GX up.
++	 */
++	.flags = RETAIN_FF_ENABLE,
+ };
+ 
+ static struct gdsc *gx_clkctl_gdscs[] = {
+-- 
+2.54.0 (Apple Git-157)
+

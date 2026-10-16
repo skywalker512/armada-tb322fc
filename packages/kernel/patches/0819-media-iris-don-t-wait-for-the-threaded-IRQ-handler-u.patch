@@ -1,0 +1,113 @@
+From 9d99ec9c6ee98547bc2a9e780239f4463f7db88e Mon Sep 17 00:00:00 2001
+From: h0cheung <hcheunh@gmail.com>
+Date: Wed, 7 Oct 2026 21:30:13 +0800
+Subject: [PATCH 17/48] media: iris: don't wait for the threaded IRQ handler
+ under core->lock
+
+iris_vpu_power_off() calls disable_irq(), which waits for a running
+threaded handler. All its callers hold core->lock: iris_core_deinit()
+(remove and the sys error handler), the iris_core_init() error path, and
+runtime suspend/resume. The threaded handler iris_hfi_isr_handler() takes
+core->lock first thing. If an interrupt arrives just before power off,
+the two wait for each other:
+
+  rmmod qcom_iris
+    iris_remove -> iris_core_deinit    mutex_lock(&core->lock)
+      iris_fw_unload
+      iris_vpu_power_off -> disable_irq -> synchronize_irq   (waits for irq/281-iris)
+  irq/281-iris
+    iris_hfi_isr_handler               mutex_lock(&core->lock)  (waits for rmmod)
+  -> hung task panic
+
+This is exactly the hang TB322FC hits: rmmod qcom_iris sits in D state in
+__synchronize_irq <- disable_irq <- iris_vpu_power_off <- iris_core_deinit
+<- iris_remove, and swapping the module needs a reboot.
+
+Track the power state under core->lock, let the handler skip the hardware
+when it is off, and use disable_irq_nosync() in iris_vpu_power_off().
+iris_core_deinit() synchronizes the IRQ after it drops the lock, so
+remove still waits for the handler before it tears down.
+
+Imported from joonhoekim/tb323fu-linux kernel/patches/0112 (Joonhoe Kim
+<26rote@gmail.com>).
+---
+ drivers/media/platform/qcom/iris/iris_core.c       | 3 +++
+ drivers/media/platform/qcom/iris/iris_core.h       | 1 +
+ drivers/media/platform/qcom/iris/iris_hfi_common.c | 6 ++++++
+ drivers/media/platform/qcom/iris/iris_vpu_common.c | 9 ++++++++-
+ 4 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_core.c b/drivers/media/platform/qcom/iris/iris_core.c
+index 8c335dbfc..d4fcf5d07 100644
+--- a/drivers/media/platform/qcom/iris/iris_core.c
++++ b/drivers/media/platform/qcom/iris/iris_core.c
+@@ -28,6 +28,9 @@ void iris_core_deinit(struct iris_core *core)
+ 	}
+ 	mutex_unlock(&core->lock);
+ 
++	/* let a handler that was waiting for core->lock finish */
++	synchronize_irq(core->irq);
++
+ 	if (!ret)
+ 		pm_runtime_put_sync(core->dev);
+ }
+diff --git a/drivers/media/platform/qcom/iris/iris_core.h b/drivers/media/platform/qcom/iris/iris_core.h
+index 24da60448..46127b1e8 100644
+--- a/drivers/media/platform/qcom/iris/iris_core.h
++++ b/drivers/media/platform/qcom/iris/iris_core.h
+@@ -83,6 +83,7 @@ struct iris_core {
+ 	struct device				*dev;
+ 	void __iomem				*reg_base;
+ 	int					irq;
++	bool					hw_powered;
+ 	struct v4l2_device			v4l2_dev;
+ 	struct video_device			*vdev_dec;
+ 	struct video_device			*vdev_enc;
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_common.c b/drivers/media/platform/qcom/iris/iris_hfi_common.c
+index 8769ec61f..0b372429b 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_common.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_common.c
+@@ -105,6 +105,12 @@ irqreturn_t iris_hfi_isr_handler(int irq, void *data)
+ 		return IRQ_NONE;
+ 
+ 	mutex_lock(&core->lock);
++	if (!core->hw_powered) {
++		/* powered off meanwhile: undo iris_hfi_isr()'s disable only */
++		mutex_unlock(&core->lock);
++		enable_irq(irq);
++		return IRQ_HANDLED;
++	}
+ 	pm_runtime_mark_last_busy(core->dev);
+ 	iris_vpu_clear_interrupt(core);
+ 	mutex_unlock(&core->lock);
+diff --git a/drivers/media/platform/qcom/iris/iris_vpu_common.c b/drivers/media/platform/qcom/iris/iris_vpu_common.c
+index e4847c107..db025caf8 100644
+--- a/drivers/media/platform/qcom/iris/iris_vpu_common.c
++++ b/drivers/media/platform/qcom/iris/iris_vpu_common.c
+@@ -236,8 +236,14 @@ void iris_vpu_power_off(struct iris_core *core)
+ 	core->iris_platform_data->vpu_ops->power_off_controller(core);
+ 	iris_unset_icc_bw(core);
+ 
++	/*
++	 * Callers hold core->lock, which the threaded handler takes too:
++	 * don't wait for it here. It sees hw_powered == false and leaves the
++	 * hardware alone.
++	 */
++	core->hw_powered = false;
+ 	if (!iris_vpu_watchdog(core, core->intr_status))
+-		disable_irq(core->irq);
++		disable_irq_nosync(core->irq);
+ }
+ 
+ int iris_vpu_power_on_controller(struct iris_core *core)
+@@ -487,6 +493,7 @@ int iris_vpu_power_on(struct iris_core *core)
+ 
+ 	iris_vpu_interrupt_init(core);
+ 	core->intr_status = 0;
++	core->hw_powered = true;
+ 	enable_irq(core->irq);
+ 
+ 	return 0;
+-- 
+2.54.0 (Apple Git-157)
+
