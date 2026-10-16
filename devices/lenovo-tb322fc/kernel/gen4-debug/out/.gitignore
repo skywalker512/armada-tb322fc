@@ -1,0 +1,5 @@
+# Boot images and kernel binaries are not committed.
+*.img
+*.zst
+Image
+*.dtb

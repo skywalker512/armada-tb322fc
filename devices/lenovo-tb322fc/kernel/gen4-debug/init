@@ -1,0 +1,107 @@
+#!/bin/busybox sh
+# shellcheck shell=sh
+# RAM-only debug shell for TB322FC / elden.
+# Never mounts a block device, never writes /dev/sd* or /dev/mmcblk*,
+# and never calls reboot or poweroff.
+
+cd /
+
+say() {
+  /bin/busybox echo "ARMADA-DBG: $*" > /dev/kmsg
+  /bin/busybox echo "ARMADA-DBG: $*" > /dev/tty0
+}
+
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox mkdir -p /dev/pts /sys/kernel/config /sys/kernel/debug
+/bin/busybox mount -t devpts devpts /dev/pts
+/bin/busybox mount -t configfs configfs /sys/kernel/config
+# debugfs is optional; keep going if this kernel has it disabled.
+/bin/busybox mount -t debugfs debugfs /sys/kernel/debug || say "debugfs mount failed"
+/bin/busybox echo 7 > /proc/sys/kernel/printk
+
+say "init started"
+
+udc=""
+waited=0
+say "waiting up to 60s for /sys/class/udc"
+while [ "$waited" -lt 60 ]; do
+  for ent in /sys/class/udc/*; do
+    if [ -e "$ent" ]; then
+      udc=${ent##*/}
+      break
+    fi
+  done
+  if [ -n "$udc" ]; then
+    break
+  fi
+  waited=$((waited + 1))
+  /bin/busybox sleep 1
+done
+
+if [ -n "$udc" ]; then
+  say "udc found after ${waited}s: $udc"
+  for ent in /sys/class/udc/*; do
+    if [ -e "$ent" ]; then
+      say "udc entry: ${ent##*/}"
+    fi
+  done
+else
+  say "no udc entry after 60s"
+fi
+
+g=/sys/kernel/config/usb_gadget/g1
+if /bin/busybox mkdir -p "$g/strings/0x409" "$g/configs/c.1" "$g/functions/acm.usb0"; then
+  /bin/busybox echo 0x1d6b > "$g/idVendor"
+  /bin/busybox echo 0x0104 > "$g/idProduct"
+  /bin/busybox echo ARMADA > "$g/strings/0x409/manufacturer"
+  /bin/busybox echo "TB322FC gen4 debug" > "$g/strings/0x409/product"
+  /bin/busybox echo armada-gen4-debug > "$g/strings/0x409/serialnumber"
+  /bin/busybox echo 500 > "$g/configs/c.1/MaxPower"
+  /bin/busybox ln -s "$g/functions/acm.usb0" "$g/configs/c.1/acm.usb0"
+  if [ -n "$udc" ]; then
+    if /bin/busybox echo "$udc" > "$g/UDC"; then
+      say "gadget g1 bound to $udc"
+    else
+      say "gadget g1 bind failed for $udc"
+    fi
+  else
+    say "gadget g1 created but not bound"
+  fi
+else
+  say "gadget g1 setup failed"
+fi
+
+role_found=0
+for role in /sys/class/usb_role/*/role; do
+  if [ ! -e "$role" ]; then
+    continue
+  fi
+  role_found=1
+  if /bin/busybox echo device > "$role"; then
+    say "usb_role device: $role"
+  else
+    say "usb_role write failed: $role"
+  fi
+done
+if [ "$role_found" -eq 0 ]; then
+  say "no usb_role entries"
+fi
+
+say "starting ttyGS0 shell"
+
+heartbeat() {
+  while true; do
+    /bin/busybox sleep 10
+    up=$(/bin/busybox cat /proc/uptime) || up="unknown"
+    up=${up%% *}
+    /bin/busybox echo "ARMADA-DBG alive $up" > /dev/tty0
+  done
+}
+heartbeat &
+
+while true; do
+  /bin/busybox setsid /bin/busybox sh -c 'exec /bin/busybox sh -i </dev/ttyGS0 >/dev/ttyGS0 2>&1'
+  /bin/busybox sleep 1
+done
