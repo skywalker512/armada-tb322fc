@@ -14,7 +14,7 @@
 
 ## 构建
 
-主机工具与上游 `scripts/build-boot.sh` 相同：clang / ld.lld / LLVM、`gcc-aarch64-linux-gnu`、`libc6-dev-arm64-cross`、mkbootimg、flex、bison、bc、libssl-dev、libelf-dev、pahole（dwarves）。
+主机工具：clang / ld.lld / LLVM、`gcc-aarch64-linux-gnu`、`libc6-dev-arm64-cross`、python3、curl、flex、bison、bc、libssl-dev、libelf-dev、pahole（dwarves）、zstd。`mkbootimg` 不装发行版包；`build.sh` 从 AOSP 固定提交下载 `mkbootimg.py` 和 `gki/generate_gki_certificate.py`，校验 sha256 后用 python3 运行。
 
 ```console
 ./devices/lenovo-tb322fc/kernel/gen4-debug/build.sh

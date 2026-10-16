@@ -15,6 +15,12 @@ KERNEL_SHA=6f97250ead155fc3b980856323e99a4623dae73d
 KERNEL_TREE=12bc91648dd3e0f9425152cea8ed010502efec51
 BUSYBOX_URL=https://busybox.net/downloads/busybox-1.36.1.tar.bz2
 BUSYBOX_SHA=b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+# AOSP mkbootimg. Distro packages import gki/ without shipping it, so the
+# script downloads these two files itself and runs them with python3.
+MKBOOTIMG_COMMIT=d2bb0af5ba6d3198a3e99529c97eda1be0b5a093
+MKBOOTIMG_URL=https://android.googlesource.com/platform/system/tools/mkbootimg
+MKBOOTIMG_PY_SHA=37d84b3d162e0bc62e36c1f4e1c63c85ea0caa9f29be023eb2f8efe006ad948c
+GKI_CERT_SHA=1bb1feec68a13da18d581aa2c631798f86f6bc10b55d587b2dd31446a0f8a203
 
 # Applets the debug init and the interactive shell need. Already present in
 # the umbrella busybox.config; forced on so a config drift cannot drop them.
@@ -40,12 +46,26 @@ need() {
   }
 }
 
-for program in python3 make cc curl tar git sha256sum \
+for program in python3 make cc curl tar git sha256sum base64 \
   aarch64-linux-gnu-gcc aarch64-linux-gnu-readelf \
   clang ld.lld llvm-ar llvm-nm llvm-objcopy \
-  mkbootimg zstd pahole flex bison bc; do
+  zstd pahole flex bison bc; do
   need "$program"
 done
+
+# googlesource ?format=TEXT is base64. Decode and require the pinned sha256.
+fetch_googlesource_file() {
+  local url=$1 dest=$2 sha=$3
+  if [[ -f "$dest" ]] && echo "$sha  $dest" | sha256sum -c --status -; then
+    echo "reuse $dest"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  curl --fail --location --silent --show-error "${url}?format=TEXT" \
+    | base64 -d >"$dest.part"
+  mv "$dest.part" "$dest"
+  echo "$sha  $dest" | sha256sum -c -
+}
 
 ensure_commit() {
   local dir=$1 url=$2 sha=$3
@@ -164,6 +184,14 @@ PY
 }
 
 echo "=== fetch pinned sources ==="
+fetch_googlesource_file \
+  "$MKBOOTIMG_URL/+/$MKBOOTIMG_COMMIT/mkbootimg.py" \
+  "$WORK/mkbootimg/mkbootimg.py" \
+  "$MKBOOTIMG_PY_SHA"
+fetch_googlesource_file \
+  "$MKBOOTIMG_URL/+/$MKBOOTIMG_COMMIT/gki/generate_gki_certificate.py" \
+  "$WORK/mkbootimg/gki/generate_gki_certificate.py" \
+  "$GKI_CERT_SHA"
 ensure_commit "$WORK/kernel" "$KERNEL_URL" "$KERNEL_SHA"
 ensure_commit "$WORK/umbrella" "$UMBRELLA_URL" "$UMBRELLA_SHA"
 actual_tree=$(git -C "$WORK/kernel" write-tree)
@@ -287,7 +315,7 @@ cp "$WORK/build/kernel/arch/arm64/boot/dts/qcom/sm8750-lenovo-elden.dtb" \
   "$WORK/artifacts/sm8750-lenovo-elden.dtb"
 cp "$WORK/build/kernel/.config" "$WORK/artifacts/kernel.config"
 : >"$WORK/empty-ramdisk"
-mkbootimg --header_version 4 \
+python3 "$WORK/mkbootimg/mkbootimg.py" --header_version 4 \
   --kernel "$WORK/artifacts/Image" \
   --ramdisk "$WORK/empty-ramdisk" \
   --os_version 15.0.0 \
@@ -364,6 +392,10 @@ duration=$((end_epoch - START_EPOCH))
   echo "  kernel: $KERNEL_URL $KERNEL_SHA"
   echo "  kernel_write_tree: $actual_tree"
   echo "  busybox: 1.36.1 $BUSYBOX_SHA"
+  echo "  mkbootimg: $MKBOOTIMG_URL $MKBOOTIMG_COMMIT"
+  echo "    mkbootimg.py $MKBOOTIMG_PY_SHA"
+  echo "    gki/generate_gki_certificate.py $GKI_CERT_SHA"
+  echo "  mkbootimg_choice: fetched AOSP sources in the work dir and ran them with python3; the host mkbootimg package is not used"
   echo
   echo "compilers:"
   echo "  clang: $(clang --version | head -n 1)"
