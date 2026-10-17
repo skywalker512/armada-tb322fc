@@ -23,6 +23,26 @@ say() {
 
 say "init started"
 
+# Audio codec chain: the defconfig builds these as modules, so without them
+# the sound card never registers (all of them stay on the deferred list).
+# Order matters only in that dependencies must come first.
+if [ -d /lib/modules ]; then
+  say "loading audio modules"
+  for m in slimbus regmap_sdw \
+           pinctrl_lpass_lpi pinctrl_sm8650_lpass_lpi \
+           snd_soc_lpass_macro_common snd_soc_lpass_rx_macro \
+           snd_soc_lpass_tx_macro snd_soc_lpass_va_macro \
+           snd_soc_lpass_wsa_macro soundwire_qcom \
+           snd_soc_wcd_common snd_soc_wcd_mbhc snd_soc_wcd_classh \
+           snd_soc_wcd939x_sdw snd_soc_wcd939x; do
+    /bin/busybox modprobe "$m" 2>/dev/null || say "modprobe failed: $m"
+  done
+  /bin/busybox sleep 3
+  say "audio: $(/bin/busybox cat /proc/asound/cards 2>&1 | /bin/busybox tr "\n" " ")"
+else
+  say "no /lib/modules"
+fi
+
 udc=""
 waited=0
 say "waiting up to 60s for /sys/class/udc"
